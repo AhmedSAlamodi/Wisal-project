@@ -4,7 +4,7 @@ A lost-and-found web app (PWA) that helps university students report and track l
 
 ## **Live Demo**
 
-* Try it via the link: ``
+* Try it via the link: `https://wisal-project-vert.vercel.app/`
 
 ## **Built with AI**
 
