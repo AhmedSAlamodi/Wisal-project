@@ -435,6 +435,7 @@ export function ReportLostView({
             ref={studentNameRef}
             id="lost-student-name"
             type="text"
+            maxLength={120}
             enterKeyHint="next"
             required
             disabled={isSubmitting}
@@ -513,6 +514,7 @@ export function ReportLostView({
             ref={itemNameRef}
             id="lost-item-name"
             type="text"
+            maxLength={120}
             enterKeyHint="next"
             required
             disabled={isSubmitting}
@@ -543,6 +545,7 @@ export function ReportLostView({
             ref={descriptionRef}
             id="lost-description"
             rows={3}
+            maxLength={1000}
             required
             disabled={isSubmitting}
             value={form.description}
@@ -593,6 +596,7 @@ export function ReportLostView({
               ref={roomRef}
               id="lost-room"
               type="text"
+              maxLength={160}
               enterKeyHint="next"
               required
               disabled={isSubmitting}
@@ -649,6 +653,7 @@ export function ReportLostView({
           {form.isCustomTime && (
             <input
               type="text"
+              maxLength={100}
               enterKeyHint="next"
               value={form.customTimePeriod}
               onKeyDown={(e) => handleAdvanceOnEnter(e, phoneRef.current)}
@@ -687,6 +692,7 @@ export function ReportLostView({
               ref={phoneRef}
               id="lost-phone"
               type="tel"
+              maxLength={20}
               dir="ltr"
               inputMode="tel"
               enterKeyHint="done"

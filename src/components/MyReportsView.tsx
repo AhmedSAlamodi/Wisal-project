@@ -15,6 +15,8 @@ import {
   MapPin,
   MessageCircle,
   PackageCheck,
+  Pencil,
+  RefreshCw,
   Search,
   Trash2,
   X,
@@ -23,14 +25,27 @@ import {
   buildOfficialWhatsAppUrl,
   NOT_FOUND_NOTIFICATION_MESSAGE,
 } from '../services/apiService';
-import type { LostReport, LostReportStatus } from '../types/report';
+import {
+  LOCATION_TYPES,
+  type LocationType,
+  type LostReport,
+  type LostReportStatus,
+  type UpdateLostReportPayload,
+} from '../types/report';
 import { MobileNotificationPrompt } from './MobileNotificationPrompt';
 
 interface MyReportsViewProps {
   myReports: { report: LostReport; ownedInBrowser: boolean }[];
   isLoading: boolean;
+  isRefreshing?: boolean;
+  onRefresh?: () => void;
   onLookupByCode: (reportCode: string) => Promise<void>;
+  onUpdateReport: (
+    reportId: string,
+    payload: UpdateLostReportPayload
+  ) => Promise<void>;
   onCancelReport: (reportId: string) => Promise<void>;
+  onDeleteReport?: (reportId: string) => Promise<void>;
   onMarkNotificationRead: (reportId: string) => Promise<void>;
   onRemoveFromMyList: (reportId: string) => void;
   onGoToReportForm: () => void;
@@ -109,8 +124,12 @@ function formatArabicDateTime(isoString?: string): string | null {
 export function MyReportsView({
   myReports,
   isLoading,
+  isRefreshing = false,
+  onRefresh,
   onLookupByCode,
+  onUpdateReport,
   onCancelReport,
+  onDeleteReport,
   onMarkNotificationRead,
   onRemoveFromMyList,
   onGoToReportForm,
@@ -121,8 +140,20 @@ export function MyReportsView({
   const [isSearching, setIsSearching] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
+  const [editTarget, setEditTarget] = useState<LostReport | null>(null);
+  const [editForm, setEditForm] = useState<UpdateLostReportPayload>({
+    itemName: '',
+    description: '',
+    locationType: LOCATION_TYPES[0],
+    roomOrLocation: '',
+    timePeriod: '',
+  });
+  const [editError, setEditError] = useState<string | null>(null);
+  const [isUpdating, setIsUpdating] = useState(false);
+
   const [cancelTarget, setCancelTarget] = useState<LostReport | null>(null);
   const [isCancelling, setIsCancelling] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [markingReadId, setMarkingReadId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -135,6 +166,70 @@ export function MyReportsView({
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [cancelTarget, isCancelling]);
+
+  useEffect(() => {
+    if (!editTarget) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !isUpdating) {
+        setEditTarget(null);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [editTarget, isUpdating]);
+
+  const openEditModal = (report: LostReport) => {
+    setEditTarget(report);
+    setEditForm({
+      itemName: report.itemName,
+      description: report.description,
+      locationType: report.locationType,
+      roomOrLocation: report.roomOrLocation,
+      timePeriod: report.timePeriod,
+    });
+    setEditError(null);
+  };
+
+  const handleEditSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!editTarget || isUpdating) return;
+    setEditError(null);
+
+    if (!editForm.itemName.trim()) {
+      setEditError('يرجى كتابة اسم الغرض المفقود.');
+      return;
+    }
+    if (!editForm.description.trim()) {
+      setEditError('يرجى إدخال المواصفات الدقيقة للمطابقة.');
+      return;
+    }
+    if (!editForm.roomOrLocation.trim()) {
+      setEditError('يرجى تحديد رقم القاعة أو تفاصيل المكان.');
+      return;
+    }
+    if (!editForm.timePeriod.trim()) {
+      setEditError('يرجى تحديد الفترة الزمنية.');
+      return;
+    }
+
+    setIsUpdating(true);
+    try {
+      await onUpdateReport(editTarget.id, {
+        itemName: editForm.itemName.trim(),
+        description: editForm.description.trim(),
+        locationType: editForm.locationType,
+        roomOrLocation: editForm.roomOrLocation.trim(),
+        timePeriod: editForm.timePeriod.trim(),
+      });
+      setEditTarget(null);
+    } catch (err) {
+      setEditError(
+        err instanceof Error ? err.message : 'تعذر تعديل البلاغ حالياً.'
+      );
+    } finally {
+      setIsUpdating(false);
+    }
+  };
 
   const handleSearchSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -190,6 +285,16 @@ export function MyReportsView({
     }
   };
 
+  const handleDeleteCancelled = async (reportId: string) => {
+    if (!onDeleteReport || deletingId) return;
+    setDeletingId(reportId);
+    try {
+      await onDeleteReport(reportId);
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
   const handleAcknowledgeAlert = async (reportId: string) => {
     if (markingReadId) return;
     setMarkingReadId(reportId);
@@ -213,14 +318,34 @@ export function MyReportsView({
           </p>
         </div>
 
-        <button
-          type="button"
-          onClick={onGoToReportForm}
-          className="inline-flex items-center justify-center gap-2 px-4 py-2.5 min-h-[44px] rounded-lg bg-[#0F2942] hover:bg-[#163859] text-white text-sm font-semibold transition-all active:scale-[0.99] whitespace-nowrap shrink-0 cursor-pointer"
-        >
-          <FilePlus2 className="w-4 h-4 shrink-0" strokeWidth={1.6} aria-hidden="true" />
-          <span>إبلاغ عن فقد جديد</span>
-        </button>
+        <div className="flex items-center gap-2 shrink-0">
+          {onRefresh && (
+            <button
+              type="button"
+              onClick={onRefresh}
+              disabled={isRefreshing || isLoading}
+              title="تحديث حالة البلاغات"
+              aria-label="تحديث حالة البلاغات"
+              className="inline-flex items-center justify-center gap-1.5 px-3 py-2.5 min-h-[44px] rounded-lg border border-[#E2E8F0] bg-white hover:bg-[#F5F7FA] disabled:opacity-60 text-[#0F2942] text-xs font-semibold transition-all active:scale-[0.99] whitespace-nowrap cursor-pointer"
+            >
+              <RefreshCw
+                className={`w-4 h-4 shrink-0 ${isRefreshing ? 'animate-spin' : ''}`}
+                strokeWidth={1.6}
+                aria-hidden="true"
+              />
+              <span>تحديث</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={onGoToReportForm}
+            className="inline-flex items-center justify-center gap-2 px-4 py-2.5 min-h-[44px] rounded-lg bg-[#0F2942] hover:bg-[#163859] text-white text-sm font-semibold transition-all active:scale-[0.99] whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <FilePlus2 className="w-4 h-4 shrink-0" strokeWidth={1.6} aria-hidden="true" />
+            <span>إبلاغ عن فقد جديد</span>
+          </button>
+        </div>
       </div>
 
       {/* بطاقة تفعيل إشعارات الجوال وتوجيه آيفون */}
@@ -247,6 +372,7 @@ export function MyReportsView({
             <input
               id="lookup-report-code"
               type="text"
+              maxLength={32}
               dir="ltr"
               disabled={isSearching}
               value={codeInput}
@@ -342,7 +468,8 @@ export function MyReportsView({
             const badge = STATUS_BADGE[report.status];
             const currentStep = getStepIndex(report.status);
             const isCopied = copiedId === report.id;
-            const canWithdraw = report.status === 'pending';
+            const canEditOrWithdraw = ownedInBrowser && report.status === 'pending';
+            const canWithdraw = report.status === 'pending' && ownedInBrowser;
             const hasUnreadNotification = Boolean(report.notification?.unread);
             const showMatchedAlert = report.status === 'matched';
             const showNotFoundAlert =
@@ -401,7 +528,7 @@ export function MyReportsView({
                   </h2>
 
                   {/* تنويه البطاقة الجامعية */}
-                  {ownedInBrowser ? (
+                  {ownedInBrowser && report.studentName ? (
                     <div className="mt-3 flex items-center gap-2 rounded-lg bg-[#F5F7FA] border border-[#E2E8F0] px-3 py-2 text-xs text-slate-700">
                       <IdCard className="w-4 h-4 text-[#0F2942] shrink-0" strokeWidth={1.5} aria-hidden="true" />
                       <span>
@@ -502,22 +629,24 @@ export function MyReportsView({
                           </p>
                         )}
 
-                        {hasUnreadNotification ? (
-                          <button
-                            type="button"
-                            disabled={markingReadId === report.id}
-                            onClick={() => void handleAcknowledgeAlert(report.id)}
-                            className="inline-flex items-center gap-1.5 px-3 py-1.5 min-h-[34px] rounded-md bg-[#166534] hover:bg-[#14532D] disabled:opacity-70 text-white text-[11px] font-semibold transition-all active:scale-[0.99] cursor-pointer"
-                          >
-                            <CheckCheck className="w-3.5 h-3.5 shrink-0" strokeWidth={1.6} aria-hidden="true" />
-                            <span>تأكيد قراءة التنبيه</span>
-                          </button>
-                        ) : report.notification?.readAt ? (
-                          <div className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#166534]/85">
-                            <CheckCheck className="w-3.5 h-3.5 shrink-0" strokeWidth={1.6} aria-hidden="true" />
-                            <span>تم تأكيد قراءة التنبيه</span>
-                          </div>
-                        ) : null}
+                        {ownedInBrowser && (
+                          hasUnreadNotification ? (
+                            <button
+                              type="button"
+                              disabled={markingReadId === report.id}
+                              onClick={() => void handleAcknowledgeAlert(report.id)}
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 min-h-[34px] rounded-md bg-[#166534] hover:bg-[#14532D] disabled:opacity-70 text-white text-[11px] font-semibold transition-all active:scale-[0.99] cursor-pointer"
+                            >
+                              <CheckCheck className="w-3.5 h-3.5 shrink-0" strokeWidth={1.6} aria-hidden="true" />
+                              <span>تأكيد قراءة التنبيه</span>
+                            </button>
+                          ) : report.notification?.readAt ? (
+                            <div className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#166534]/85">
+                              <CheckCheck className="w-3.5 h-3.5 shrink-0" strokeWidth={1.6} aria-hidden="true" />
+                              <span>تم تأكيد قراءة التنبيه</span>
+                            </div>
+                          ) : null
+                        )}
                       </div>
 
                       {report.status === 'matched' && (
@@ -558,22 +687,24 @@ export function MyReportsView({
                         </p>
                       )}
 
-                      {hasUnreadNotification ? (
-                        <button
-                          type="button"
-                          disabled={markingReadId === report.id}
-                          onClick={() => void handleAcknowledgeAlert(report.id)}
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 min-h-[34px] rounded-md bg-[#92400E] hover:bg-[#78350F] disabled:opacity-70 text-white text-[11px] font-semibold transition-all active:scale-[0.99] cursor-pointer"
-                        >
-                          <CheckCheck className="w-3.5 h-3.5 shrink-0" strokeWidth={1.6} aria-hidden="true" />
-                          <span>تأكيد قراءة التنبيه</span>
-                        </button>
-                      ) : report.notification?.readAt ? (
-                        <div className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#92400E]/85">
-                          <CheckCheck className="w-3.5 h-3.5 shrink-0" strokeWidth={1.6} aria-hidden="true" />
-                          <span>تم تأكيد قراءة التنبيه</span>
-                        </div>
-                      ) : null}
+                      {ownedInBrowser && (
+                        hasUnreadNotification ? (
+                          <button
+                            type="button"
+                            disabled={markingReadId === report.id}
+                            onClick={() => void handleAcknowledgeAlert(report.id)}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 min-h-[34px] rounded-md bg-[#92400E] hover:bg-[#78350F] disabled:opacity-70 text-white text-[11px] font-semibold transition-all active:scale-[0.99] cursor-pointer"
+                          >
+                            <CheckCheck className="w-3.5 h-3.5 shrink-0" strokeWidth={1.6} aria-hidden="true" />
+                            <span>تأكيد قراءة التنبيه</span>
+                          </button>
+                        ) : report.notification?.readAt ? (
+                          <div className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#92400E]/85">
+                            <CheckCheck className="w-3.5 h-3.5 shrink-0" strokeWidth={1.6} aria-hidden="true" />
+                            <span>تم تأكيد قراءة التنبيه</span>
+                          </div>
+                        ) : null
+                      )}
                     </div>
                   )}
 
@@ -584,21 +715,51 @@ export function MyReportsView({
                   )}
 
                   {report.status === 'cancelled' && (
-                    <div className="rounded-lg bg-[#F1F5F9] border border-[#E2E8F0] px-3.5 py-2.5 text-xs text-[#475569] font-medium text-center leading-relaxed">
-                      تم سحب البلاغ من الطالب بعد العثور على الغرض وإيقاف المراجعة بالمكتب
+                    <div className="space-y-2">
+                      <div className="rounded-lg bg-[#F1F5F9] border border-[#E2E8F0] px-3.5 py-2.5 text-xs text-[#475569] font-medium text-center leading-relaxed">
+                        تم سحب البلاغ من الطالب بعد العثور على الغرض وإيقاف المراجعة بالمكتب
+                      </div>
+                      {ownedInBrowser && onDeleteReport && (
+                        <button
+                          type="button"
+                          disabled={deletingId === report.id}
+                          onClick={() => void handleDeleteCancelled(report.id)}
+                          className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 min-h-[38px] rounded-lg border border-[#FECACA] bg-[#FEE2E2]/45 hover:bg-[#FEE2E2] disabled:opacity-60 text-[#991B1B] text-xs font-semibold transition-all active:scale-[0.99] cursor-pointer"
+                        >
+                          {deletingId === report.id ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" strokeWidth={1.6} aria-hidden="true" />
+                          ) : (
+                            <Trash2 className="w-3.5 h-3.5 shrink-0" strokeWidth={1.6} aria-hidden="true" />
+                          )}
+                          <span>حذف البلاغ نهائياً من السجل</span>
+                        </button>
+                      )}
                     </div>
                   )}
 
-                  {/* زر سحب البلاغ */}
-                  {canWithdraw && (
-                    <button
-                      type="button"
-                      onClick={() => setCancelTarget(report)}
-                      className="w-full inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 min-h-[42px] rounded-lg border border-[#E2E8F0] bg-white hover:bg-[#F5F7FA] text-slate-700 hover:text-[#0F2942] text-xs font-semibold transition-all active:scale-[0.99] cursor-pointer"
-                    >
-                      <Ban className="w-3.5 h-3.5 text-slate-500 shrink-0" strokeWidth={1.6} aria-hidden="true" />
-                      <span>سحب البلاغ (وجدت غرضي)</span>
-                    </button>
+                  {/* أزرار تعديل وسحب البلاغ */}
+                  {canEditOrWithdraw && (
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => openEditModal(report)}
+                        className="inline-flex items-center justify-center gap-1.5 px-3 py-2.5 min-h-[42px] rounded-lg border border-[#E2E8F0] bg-white hover:bg-[#F5F7FA] text-[#0F2942] text-xs font-semibold transition-all active:scale-[0.99] cursor-pointer"
+                      >
+                        <Pencil className="w-3.5 h-3.5 text-slate-500 shrink-0" strokeWidth={1.6} aria-hidden="true" />
+                        <span>تعديل البلاغ</span>
+                      </button>
+
+                      {canWithdraw && (
+                        <button
+                          type="button"
+                          onClick={() => setCancelTarget(report)}
+                          className="inline-flex items-center justify-center gap-1.5 px-3 py-2.5 min-h-[42px] rounded-lg border border-[#E2E8F0] bg-white hover:bg-[#F5F7FA] text-slate-700 hover:text-[#0F2942] text-xs font-semibold transition-all active:scale-[0.99] cursor-pointer"
+                        >
+                          <Ban className="w-3.5 h-3.5 text-slate-500 shrink-0" strokeWidth={1.6} aria-hidden="true" />
+                          <span>سحب البلاغ</span>
+                        </button>
+                      )}
+                    </div>
                   )}
 
                   <div className="flex items-center gap-2 pt-0.5">
@@ -629,6 +790,198 @@ export function MyReportsView({
               </article>
             );
           })}
+        </div>
+      )}
+
+      {/* نافذة تعديل البلاغ المعلق */}
+      {editTarget && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#0F2942]/45 backdrop-blur-[2px]"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="edit-report-title"
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !isUpdating) {
+              setEditTarget(null);
+            }
+          }}
+        >
+          <div className="bg-white w-full max-w-md rounded-xl border border-[#E2E8F0] shadow-xs overflow-hidden max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-[#E2E8F0]">
+              <div className="flex items-center gap-2">
+                <Pencil
+                  className="w-5 h-5 text-[#0F2942] shrink-0"
+                  strokeWidth={1.6}
+                  aria-hidden="true"
+                />
+                <h2
+                  id="edit-report-title"
+                  className="text-base font-bold text-[#0F2942]"
+                >
+                  تعديل بيانات البلاغ ({editTarget.reportCode})
+                </h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditTarget(null)}
+                disabled={isUpdating}
+                aria-label="إغلاق"
+                className="w-8 h-8 rounded-lg flex items-center justify-center text-slate-500 hover:bg-[#F5F7FA] disabled:opacity-50 cursor-pointer active:scale-[0.99]"
+              >
+                <X className="w-4 h-4" strokeWidth={1.6} />
+              </button>
+            </div>
+
+            <form onSubmit={handleEditSubmit} className="p-5 space-y-4">
+              {editError && (
+                <div
+                  role="alert"
+                  className="p-3 rounded-lg bg-[#FEE2E2] border border-[#FECACA] text-[#991B1B] text-xs font-medium"
+                >
+                  {editError}
+                </div>
+              )}
+
+              <div className="space-y-1.5">
+                <label
+                  htmlFor="edit-item-name"
+                  className="block text-xs font-semibold text-[#0F2942]"
+                >
+                  اسم الغرض
+                </label>
+                <input
+                  id="edit-item-name"
+                  type="text"
+                  maxLength={120}
+                  required
+                  disabled={isUpdating}
+                  value={editForm.itemName}
+                  onChange={(e) =>
+                    setEditForm({ ...editForm, itemName: e.target.value })
+                  }
+                  className="w-full min-h-[42px] px-3.5 py-2 bg-[#F5F7FA] border border-[#E2E8F0] rounded-lg text-sm text-slate-900 focus:bg-white focus:border-[#0F2942] focus:outline-none"
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <label
+                  htmlFor="edit-description"
+                  className="block text-xs font-semibold text-[#0F2942]"
+                >
+                  المواصفات الدقيقة للمطابقة
+                </label>
+                <textarea
+                  id="edit-description"
+                  rows={3}
+                  maxLength={1000}
+                  required
+                  disabled={isUpdating}
+                  value={editForm.description}
+                  onChange={(e) =>
+                    setEditForm({ ...editForm, description: e.target.value })
+                  }
+                  className="w-full px-3.5 py-2 bg-[#F5F7FA] border border-[#E2E8F0] rounded-lg text-sm text-slate-900 focus:bg-white focus:border-[#0F2942] focus:outline-none resize-none"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <label
+                    htmlFor="edit-location-type"
+                    className="block text-xs font-semibold text-[#0F2942]"
+                  >
+                    نوع المكان
+                  </label>
+                  <select
+                    id="edit-location-type"
+                    disabled={isUpdating}
+                    value={editForm.locationType}
+                    onChange={(e) =>
+                      setEditForm({
+                        ...editForm,
+                        locationType: e.target.value as LocationType,
+                      })
+                    }
+                    className="w-full min-h-[42px] px-3 py-2 bg-[#F5F7FA] border border-[#E2E8F0] rounded-lg text-sm text-slate-900 focus:bg-white focus:border-[#0F2942] focus:outline-none"
+                  >
+                    {LOCATION_TYPES.map((loc) => (
+                      <option key={loc} value={loc}>
+                        {loc}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label
+                    htmlFor="edit-room"
+                    className="block text-xs font-semibold text-[#0F2942]"
+                  >
+                    رقم القاعة أو التفاصيل
+                  </label>
+                  <input
+                    id="edit-room"
+                    type="text"
+                    maxLength={160}
+                    required
+                    disabled={isUpdating}
+                    value={editForm.roomOrLocation}
+                    onChange={(e) =>
+                      setEditForm({
+                        ...editForm,
+                        roomOrLocation: e.target.value,
+                      })
+                    }
+                    className="w-full min-h-[42px] px-3 py-2 bg-[#F5F7FA] border border-[#E2E8F0] rounded-lg text-sm text-slate-900 focus:bg-white focus:border-[#0F2942] focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <label
+                  htmlFor="edit-time-period"
+                  className="block text-xs font-semibold text-[#0F2942]"
+                >
+                  الفترة الزمنية
+                </label>
+                <input
+                  id="edit-time-period"
+                  type="text"
+                  maxLength={100}
+                  required
+                  disabled={isUpdating}
+                  value={editForm.timePeriod}
+                  onChange={(e) =>
+                    setEditForm({ ...editForm, timePeriod: e.target.value })
+                  }
+                  className="w-full min-h-[42px] px-3.5 py-2 bg-[#F5F7FA] border border-[#E2E8F0] rounded-lg text-sm text-slate-900 focus:bg-white focus:border-[#0F2942] focus:outline-none"
+                />
+              </div>
+
+              <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2.5 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setEditTarget(null)}
+                  disabled={isUpdating}
+                  className="px-4 py-2.5 min-h-[44px] rounded-lg border border-[#E2E8F0] bg-white hover:bg-[#F5F7FA] disabled:opacity-50 text-slate-700 text-sm font-semibold transition-all active:scale-[0.99] cursor-pointer"
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="submit"
+                  disabled={isUpdating}
+                  className="inline-flex items-center justify-center gap-2 px-5 py-2.5 min-h-[44px] rounded-lg bg-[#0F2942] hover:bg-[#163859] disabled:opacity-70 text-white text-sm font-semibold transition-all active:scale-[0.99] cursor-pointer"
+                >
+                  {isUpdating ? (
+                    <Loader2 className="w-4 h-4 animate-spin shrink-0" strokeWidth={1.6} aria-hidden="true" />
+                  ) : (
+                    <Check className="w-4 h-4 shrink-0" strokeWidth={1.6} aria-hidden="true" />
+                  )}
+                  <span>{isUpdating ? 'جاري الحفظ...' : 'حفظ التعديلات'}</span>
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
 

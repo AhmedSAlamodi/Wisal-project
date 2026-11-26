@@ -78,6 +78,7 @@ export interface LostReport {
   lastCheckedAt?: string;
   notification?: ReportNotification;
   pushSubscription?: PushSubscriptionPayload | null;
+  ownerToken?: string;
 }
 
 export interface CreateLostReportPayload {
@@ -92,9 +93,18 @@ export interface CreateLostReportPayload {
   pushSubscription?: PushSubscriptionPayload | null;
 }
 
+export interface UpdateLostReportPayload {
+  itemName: string;
+  description: string;
+  locationType: LocationType;
+  roomOrLocation: string;
+  timePeriod: string;
+}
+
 export interface MyReportEntry {
   id: string;
   ownedInBrowser: boolean; // true إذا أُنشئ من هذا المتصفح، false إذا استُعيد برقم البلاغ فقط
+  ownerToken?: string;
 }
 
 export interface StudentProfile {
@@ -103,8 +113,20 @@ export interface StudentProfile {
   phoneNumber: string;
 }
 
+export interface StaffAuthStatus {
+  faculty: UniversityFaculty;
+  needsSetup: boolean;
+}
+
+export interface StaffSession {
+  token: string;
+  faculty: UniversityFaculty;
+  expiresAt: string;
+}
+
 export interface ApiResponse<T> {
   success: boolean;
   data: T | null;
   error: string | null;
+  statusCode?: number;
 }

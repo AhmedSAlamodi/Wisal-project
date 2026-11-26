@@ -2,7 +2,10 @@ import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import fs from 'fs';
 import path from 'path';
+import {fileURLToPath} from 'url';
 import {defineConfig} from 'vite';
+
+const rootDir = path.dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig(() => {
   return {
@@ -19,8 +22,8 @@ export default defineConfig(() => {
           if (error) {
             return;
           }
-          const distDir = path.resolve(__dirname, 'dist');
-          const srcAssets = path.resolve(__dirname, 'src/assets');
+          const distDir = path.resolve(rootDir, 'dist');
+          const srcAssets = path.resolve(rootDir, 'src/assets');
           const distAssets = path.resolve(distDir, 'src/assets');
           if (fs.existsSync(distDir) && fs.existsSync(srcAssets)) {
             fs.cpSync(srcAssets, distAssets, {recursive: true, force: true});
@@ -36,10 +39,19 @@ export default defineConfig(() => {
             id.includes('vite/dist/client/client.mjs')
           ) {
             return {
-              code: code.replace(
-                'if (payload.event === "vite:ws:disconnect") {',
-                'if (false && payload.event === "vite:ws:disconnect") {'
-              ),
+              code: code
+                .replace(
+                  'if (payload.event === "vite:ws:disconnect") {',
+                  'if (false && payload.event === "vite:ws:disconnect") {'
+                )
+                .replace(
+                  'async connect(handlers) {\n\t\t\ttry {\n\t\t\t\tawait wsTransport.connect(handlers);',
+                  'async connect(handlers) {\n\t\t\treturn;\n\t\t\ttry {\n\t\t\t\tawait wsTransport.connect(handlers);'
+                )
+                .replace(
+                  'send(data) {\n\t\t\twsTransport.send(data);',
+                  'send() {\n\t\t\treturn;'
+                ),
               map: null,
             };
           }
@@ -48,10 +60,13 @@ export default defineConfig(() => {
     ],
     resolve: {
       alias: {
-        '@': path.resolve(__dirname, '.'),
+        '@': path.resolve(rootDir, '.'),
       },
     },
     server: {
+      host: '0.0.0.0',
+      port: 3000,
+      allowedHosts: true as const,
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
       // Do not modify—file watching is disabled to prevent flickering during agent edits.
       hmr: process.env.DISABLE_HMR !== 'true',

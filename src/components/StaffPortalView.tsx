@@ -1,12 +1,10 @@
-import { useMemo, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import {
   AlertTriangle,
   Archive,
   BellRing,
-  Check,
   CheckCircle2,
   Clock,
-  Copy,
   Eye,
   EyeOff,
   IdCard,
@@ -17,16 +15,16 @@ import {
   MapPin,
   PackageCheck,
   Phone,
+  RefreshCw,
   Search,
   ShieldCheck,
   UserCheck,
 } from 'lucide-react';
 import {
-  COLLEGE_ACCESS_CODES,
+  apiService,
   detectUrgentItem,
   formatPhoneForDisplay,
   normalizeArabicText,
-  verifyStaffAccess,
 } from '../services/apiService';
 import {
   UNIVERSITY_FACULTIES,
@@ -38,6 +36,8 @@ import {
 interface StaffPortalViewProps {
   reports: LostReport[];
   staffFaculty: UniversityFaculty | null;
+  isRefreshing?: boolean;
+  onRefresh?: () => void;
   onLogin: (faculty: UniversityFaculty) => void;
   onLogout: () => void;
   onMarkAsMatched: (report: LostReport) => Promise<void>;
@@ -45,7 +45,6 @@ interface StaffPortalViewProps {
   onResendPickupReminder: (report: LostReport) => Promise<void>;
   onOpenDeliveryModal: (report: LostReport) => void;
   onLoginError: (message: string) => void;
-  onCopyFeedback: (message: string) => void;
 }
 
 const STATUS_LABELS: Record<
@@ -70,9 +69,28 @@ const STATUS_LABELS: Record<
   },
 };
 
+function formatStaffDate(
+  isoString: string | undefined,
+  dateStyle: 'short' | 'medium'
+): string | null {
+  if (!isoString) return null;
+  try {
+    const date = new Date(isoString);
+    if (Number.isNaN(date.getTime())) return null;
+    return new Intl.DateTimeFormat('ar', {
+      dateStyle,
+      timeStyle: 'short',
+    }).format(date);
+  } catch {
+    return null;
+  }
+}
+
 export function StaffPortalView({
   reports,
   staffFaculty,
+  isRefreshing = false,
+  onRefresh,
   onLogin,
   onLogout,
   onMarkAsMatched,
@@ -80,17 +98,17 @@ export function StaffPortalView({
   onResendPickupReminder,
   onOpenDeliveryModal,
   onLoginError,
-  onCopyFeedback,
 }: StaffPortalViewProps) {
   const [selectedFaculty, setSelectedFaculty] = useState<UniversityFaculty>(
     UNIVERSITY_FACULTIES[0]
   );
   const [passcode, setPasscode] = useState('');
+  const [confirmPasscode, setConfirmPasscode] = useState('');
   const [showPasscode, setShowPasscode] = useState(false);
-  const [copiedFacultyCode, setCopiedFacultyCode] = useState<string | null>(
-    null
-  );
   const [loginError, setLoginError] = useState<string | null>(null);
+  const [needsSetup, setNeedsSetup] = useState(false);
+  const [isCheckingStatus, setIsCheckingStatus] = useState(true);
+  const [isAuthenticating, setIsAuthenticating] = useState(false);
 
   const [activeTab, setActiveTab] = useState<LostReportStatus>('pending');
   const [searchQuery, setSearchQuery] = useState('');
@@ -98,6 +116,32 @@ export function StaffPortalView({
     id: string;
     type: 'match' | 'not_found' | 'reminder';
   } | null>(null);
+
+  useEffect(() => {
+    if (staffFaculty) return;
+    let cancelled = false;
+    setIsCheckingStatus(true);
+    setLoginError(null);
+    setPasscode('');
+    setConfirmPasscode('');
+
+    apiService.getStaffAuthStatus(selectedFaculty).then((res) => {
+      if (cancelled) return;
+      if (res.success && res.data) {
+        setNeedsSetup(res.data.needsSetup);
+      } else {
+        setNeedsSetup(false);
+        if (res.error) {
+          setLoginError(res.error);
+        }
+      }
+      setIsCheckingStatus(false);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedFaculty, staffFaculty]);
 
   // إجمالي سجل بلاغات الكلية التراكمي الكامل (لا يتأثر أبداً بالتبويب أو البحث)
   const collegeReports = useMemo(() => {
@@ -128,7 +172,13 @@ export function StaffPortalView({
       const matchStudent = normalizeArabicText(r.studentName).includes(
         normalizedQuery
       );
-      return matchCode || matchStudent;
+      const matchItem = normalizeArabicText(r.itemName).includes(
+        normalizedQuery
+      );
+      const matchRoom = normalizeArabicText(r.roomOrLocation).includes(
+        normalizedQuery
+      );
+      return matchCode || matchStudent || matchItem || matchRoom;
     });
 
     // ترتيب البلاغات الهامة (isUrgent) في أعلى القائمة دائماً ثم الأحدث
@@ -154,13 +204,14 @@ export function StaffPortalView({
     return { pending, matched, delivered, cancelled };
   }, [searchFilteredReports]);
 
-  // البلاغات المعروضة في التبويب النشط (البلاغات المسحوبة cancelled مستبعدة تماماً من قيد المراجعة وموجود بالمكتب)
+  // البلاغات المعروضة في التبويب النشط
   const filteredCollegeReports = useMemo(() => {
     return searchFilteredReports.filter((r) => r.status === activeTab);
   }, [searchFilteredReports, activeTab]);
 
-  const handleLoginSubmit = (e: FormEvent) => {
+  const handleLoginSubmit = async (e: FormEvent) => {
     e.preventDefault();
+    if (isAuthenticating || isCheckingStatus) return;
     setLoginError(null);
 
     if (!passcode.trim()) {
@@ -170,34 +221,62 @@ export function StaffPortalView({
       return;
     }
 
-    if (!verifyStaffAccess(selectedFaculty, passcode)) {
-      const msg = `رمز الدخول الأمني غير صحيح لـ (${selectedFaculty}). تأكد من إدخال الرمز المخصص لهذه الكلية.`;
+    if (needsSetup) {
+      if (passcode.trim().length < 6) {
+        const msg = 'يجب أن يتكون رمز الكلية من 6 أحرف على الأقل.';
+        setLoginError(msg);
+        onLoginError(msg);
+        return;
+      }
+      if (passcode.trim() !== confirmPasscode.trim()) {
+        const msg = 'كلمتا رمز الدخول غير متطابقتين.';
+        setLoginError(msg);
+        onLoginError(msg);
+        return;
+      }
+
+      setIsAuthenticating(true);
+      const res = await apiService.setupStaffPasscode(
+        selectedFaculty,
+        passcode.trim()
+      );
+      setIsAuthenticating(false);
+
+      if (!res.success || !res.data) {
+        const msg = res.error || 'تعذر إعداد رمز الكلية.';
+        setLoginError(msg);
+        onLoginError(msg);
+        return;
+      }
+
+      setPasscode('');
+      setConfirmPasscode('');
+      setShowPasscode(false);
+      setNeedsSetup(false);
+      onLogin(selectedFaculty);
+      return;
+    }
+
+    setIsAuthenticating(true);
+    const res = await apiService.staffLogin(selectedFaculty, passcode.trim());
+    setIsAuthenticating(false);
+
+    if (!res.success || !res.data) {
+      const msg =
+        res.error ||
+        `رمز الدخول الأمني غير صحيح لـ (${selectedFaculty}).`;
       setLoginError(msg);
       onLoginError(msg);
       return;
     }
 
     setPasscode('');
+    setConfirmPasscode('');
     setShowPasscode(false);
     onLogin(selectedFaculty);
   };
 
-  const handleCopyCollegeCode = async (faculty: UniversityFaculty) => {
-    const code = COLLEGE_ACCESS_CODES[faculty];
-    try {
-      await navigator.clipboard.writeText(code);
-    } catch {
-      // المتابعة بالتغذية الراجعة
-    }
-    setCopiedFacultyCode(faculty);
-    onCopyFeedback(`تم نسخ رمز الدخول الخاص بـ (${faculty}) إلى الحافظة.`);
-    window.setTimeout(() => setCopiedFacultyCode(null), 1800);
-  };
-
   if (!staffFaculty) {
-    const selectedCode = COLLEGE_ACCESS_CODES[selectedFaculty];
-    const isSelectedCopied = copiedFacultyCode === selectedFaculty;
-
     return (
       <div className="max-w-md mx-auto">
         <section className="bg-white border border-[#E2E8F0] rounded-xl shadow-xs p-6 space-y-5">
@@ -236,6 +315,7 @@ export function StaffPortalView({
               </label>
               <select
                 id="staff-faculty-select"
+                disabled={isAuthenticating}
                 value={selectedFaculty}
                 onChange={(e) => {
                   setSelectedFaculty(e.target.value as UniversityFaculty);
@@ -251,25 +331,42 @@ export function StaffPortalView({
               </select>
             </div>
 
+            {needsSetup && !isCheckingStatus && (
+              <div className="p-3 rounded-lg bg-[#F5F7FA] border border-[#E2E8F0] text-xs text-slate-700 leading-relaxed">
+                لم يتم تعيين رمز دخول أمني لـ{' '}
+                <strong className="text-[#0F2942]">{selectedFaculty}</strong>{' '}
+                بعد. أنشئ رمزاً خاصاً بالكلية الآن (6 أحرف على الأقل) لتأمين
+                البوابة.
+              </div>
+            )}
+
             <div className="space-y-1.5">
               <label
                 htmlFor="staff-passcode"
                 className="block text-sm font-semibold text-[#0F2942]"
               >
-                رمز الدخول الأمني للكلية
+                {needsSetup
+                  ? 'تعيين رمز الدخول الأمني للكلية'
+                  : 'رمز الدخول الأمني للكلية'}
               </label>
               <div className="relative">
                 <input
                   id="staff-passcode"
                   type={showPasscode ? 'text' : 'password'}
                   dir="ltr"
-                  autoComplete="current-password"
+                  maxLength={128}
+                  disabled={isAuthenticating || isCheckingStatus}
+                  autoComplete={needsSetup ? 'new-password' : 'current-password'}
                   value={passcode}
                   onChange={(e) => {
                     setPasscode(e.target.value);
                     if (loginError) setLoginError(null);
                   }}
-                  placeholder="أدخل الرمز الأمني للكلية"
+                  placeholder={
+                    needsSetup
+                      ? 'أدخل رمزاً أمنياً من 6 أحرف فأكثر'
+                      : 'أدخل الرمز الأمني للكلية'
+                  }
                   className="w-full min-h-[44px] pr-3.5 pl-11 py-2.5 bg-[#F5F7FA] border border-[#E2E8F0] rounded-lg text-sm font-mono font-semibold tracking-wider tabular-nums text-left text-slate-900 placeholder:font-sans placeholder:text-right placeholder:tracking-normal placeholder:font-normal placeholder:text-slate-400 focus:bg-white focus:border-[#0F2942] focus:outline-none"
                 />
                 <button
@@ -288,79 +385,53 @@ export function StaffPortalView({
               </div>
             </div>
 
+            {needsSetup && !isCheckingStatus && (
+              <div className="space-y-1.5">
+                <label
+                  htmlFor="staff-passcode-confirm"
+                  className="block text-sm font-semibold text-[#0F2942]"
+                >
+                  تأكيد رمز الدخول الأمني
+                </label>
+                <input
+                  id="staff-passcode-confirm"
+                  type={showPasscode ? 'text' : 'password'}
+                  dir="ltr"
+                  maxLength={128}
+                  disabled={isAuthenticating}
+                  autoComplete="new-password"
+                  value={confirmPasscode}
+                  onChange={(e) => {
+                    setConfirmPasscode(e.target.value);
+                    if (loginError) setLoginError(null);
+                  }}
+                  placeholder="أعد كتابة الرمز الأمني"
+                  className="w-full min-h-[44px] px-3.5 py-2.5 bg-[#F5F7FA] border border-[#E2E8F0] rounded-lg text-sm font-mono font-semibold tracking-wider tabular-nums text-left text-slate-900 placeholder:font-sans placeholder:text-right placeholder:tracking-normal placeholder:font-normal placeholder:text-slate-400 focus:bg-white focus:border-[#0F2942] focus:outline-none"
+                />
+              </div>
+            )}
+
             <button
               type="submit"
-              className="w-full inline-flex items-center justify-center gap-2 px-5 py-3 min-h-[46px] rounded-lg bg-[#0F2942] hover:bg-[#163859] text-white text-sm font-semibold transition-all active:scale-[0.99] cursor-pointer"
+              disabled={isAuthenticating || isCheckingStatus}
+              className="w-full inline-flex items-center justify-center gap-2 px-5 py-3 min-h-[46px] rounded-lg bg-[#0F2942] hover:bg-[#163859] disabled:opacity-70 text-white text-sm font-semibold transition-all active:scale-[0.99] cursor-pointer"
             >
-              <KeyRound className="w-4 h-4 shrink-0" strokeWidth={1.6} aria-hidden="true" />
-              <span>دخول إلى لوحة المكتب</span>
+              {isAuthenticating || isCheckingStatus ? (
+                <Loader2 className="w-4 h-4 animate-spin shrink-0" strokeWidth={1.6} aria-hidden="true" />
+              ) : (
+                <KeyRound className="w-4 h-4 shrink-0" strokeWidth={1.6} aria-hidden="true" />
+              )}
+              <span>
+                {isCheckingStatus
+                  ? 'جاري التحقق...'
+                  : isAuthenticating
+                  ? 'جاري التحقق من الرمز...'
+                  : needsSetup
+                  ? 'تعيين رمز الكلية والدخول'
+                  : 'دخول إلى لوحة المكتب'}
+              </span>
             </button>
           </form>
-
-          {/* رابط قابل للطي في الأسفل لنسخ رمز التجربة */}
-          <details className="pt-3 border-t border-[#E2E8F0] text-xs text-slate-600">
-            <summary className="cursor-pointer font-medium text-slate-500 hover:text-[#0F2942] select-none py-1">
-              رموز التجربة (للمعاينة والاختبار)
-            </summary>
-
-            <div className="mt-2.5 rounded-lg bg-[#F5F7FA] border border-[#E2E8F0] p-3 space-y-2.5">
-              <div className="flex items-center justify-between gap-2 bg-white border border-[#E2E8F0] rounded-lg px-3 py-2">
-                <div className="min-w-0">
-                  <span className="block text-[11px] text-slate-500 truncate">
-                    {selectedFaculty}
-                  </span>
-                  <code
-                    dir="ltr"
-                    className="block text-xs font-bold font-mono text-[#0F2942] tabular-nums mt-0.5"
-                  >
-                    {selectedCode}
-                  </code>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => void handleCopyCollegeCode(selectedFaculty)}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-[#0F2942] hover:bg-[#163859] text-white text-[11px] font-semibold shrink-0 transition-all active:scale-[0.99] cursor-pointer"
-                >
-                  {isSelectedCopied ? (
-                    <Check className="w-3 h-3 shrink-0" strokeWidth={1.6} aria-hidden="true" />
-                  ) : (
-                    <Copy className="w-3 h-3 shrink-0" strokeWidth={1.6} aria-hidden="true" />
-                  )}
-                  <span>{isSelectedCopied ? 'تم النسخ' : 'نسخ الرمز'}</span>
-                </button>
-              </div>
-
-              <ul className="space-y-1.5 max-h-44 overflow-y-auto pl-1">
-                {UNIVERSITY_FACULTIES.map((faculty) => {
-                  const code = COLLEGE_ACCESS_CODES[faculty];
-                  const isCopied = copiedFacultyCode === faculty;
-                  return (
-                    <li
-                      key={faculty}
-                      className="flex items-center justify-between gap-2 bg-white border border-[#E2E8F0] rounded-md px-2.5 py-1.5"
-                    >
-                      <span className="truncate font-medium text-slate-700">
-                        {faculty}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => void handleCopyCollegeCode(faculty)}
-                        className="inline-flex items-center gap-1.5 px-2 py-1 rounded bg-[#F5F7FA] hover:bg-slate-200/70 text-[#0F2942] font-mono text-[10px] font-bold shrink-0 cursor-pointer"
-                        title="نسخ الرمز"
-                      >
-                        <span dir="ltr">{code}</span>
-                        {isCopied ? (
-                          <Check className="w-3 h-3 text-[#166534]" strokeWidth={1.6} aria-hidden="true" />
-                        ) : (
-                          <Copy className="w-3 h-3 text-slate-400" strokeWidth={1.6} aria-hidden="true" />
-                        )}
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            </div>
-          </details>
         </section>
       </div>
     );
@@ -398,7 +469,7 @@ export function StaffPortalView({
 
   return (
     <div className="space-y-5">
-      {/* شريط المكتب النشط وزر تسجيل الخروج */}
+      {/* شريط المكتب النشط وزر التحديث وتسجيل الخروج */}
       <div className="bg-white border border-[#E2E8F0] rounded-xl shadow-xs p-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <span className="text-xs text-slate-500 font-medium">
@@ -409,14 +480,32 @@ export function StaffPortalView({
           </h1>
         </div>
 
-        <button
-          type="button"
-          onClick={onLogout}
-          className="inline-flex items-center justify-center gap-2 px-4 py-2.5 min-h-[42px] rounded-lg bg-[#F5F7FA] hover:bg-slate-200/70 border border-[#E2E8F0] text-[#0F2942] text-xs font-semibold transition-all active:scale-[0.99] cursor-pointer whitespace-nowrap shrink-0"
-        >
-          <LogOut className="w-4 h-4 shrink-0" strokeWidth={1.5} aria-hidden="true" />
-          <span>تسجيل خروج</span>
-        </button>
+        <div className="flex items-center gap-2 shrink-0">
+          {onRefresh && (
+            <button
+              type="button"
+              onClick={onRefresh}
+              disabled={isRefreshing}
+              className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 min-h-[42px] rounded-lg bg-white hover:bg-[#F5F7FA] border border-[#E2E8F0] disabled:opacity-60 text-[#0F2942] text-xs font-semibold transition-all active:scale-[0.99] cursor-pointer whitespace-nowrap shrink-0"
+            >
+              <RefreshCw
+                className={`w-4 h-4 shrink-0 ${isRefreshing ? 'animate-spin' : ''}`}
+                strokeWidth={1.5}
+                aria-hidden="true"
+              />
+              <span>تحديث</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={onLogout}
+            className="inline-flex items-center justify-center gap-2 px-4 py-2.5 min-h-[42px] rounded-lg bg-[#F5F7FA] hover:bg-slate-200/70 border border-[#E2E8F0] text-[#0F2942] text-xs font-semibold transition-all active:scale-[0.99] cursor-pointer whitespace-nowrap shrink-0"
+          >
+            <LogOut className="w-4 h-4 shrink-0" strokeWidth={1.5} aria-hidden="true" />
+            <span>تسجيل خروج</span>
+          </button>
+        </div>
       </div>
 
       {/* 3 بطاقات إحصائيات تراكمية ثابتة للكلية */}
@@ -465,7 +554,7 @@ export function StaffPortalView({
       <div className="bg-white border border-[#E2E8F0] rounded-xl shadow-xs p-4 sm:p-5 space-y-3.5">
         <div className="relative">
           <label htmlFor="staff-quick-search" className="sr-only">
-            ابحث بالاسم الثلاثي للطالب أو رقم البلاغ
+            ابحث بالاسم الثلاثي للطالب أو رقم البلاغ أو اسم الغرض أو المكان
           </label>
           <Search
             className="w-4 h-4 text-slate-400 absolute right-3.5 top-1/2 -translate-y-1/2 pointer-events-none"
@@ -475,9 +564,10 @@ export function StaffPortalView({
           <input
             id="staff-quick-search"
             type="search"
+            maxLength={120}
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="ابحث بالاسم الثلاثي للطالب أو رقم البلاغ (WS-xxx)..."
+            placeholder="ابحث بالاسم الثلاثي، رقم البلاغ (WS-xxx)، الغرض، أو المكان..."
             className="w-full min-h-[44px] pr-10 pl-3.5 py-2.5 bg-[#F5F7FA] border border-[#E2E8F0] rounded-lg text-sm text-slate-900 placeholder:text-slate-400 focus:bg-white focus:border-[#0F2942] focus:outline-none"
           />
         </div>
@@ -694,12 +784,9 @@ export function StaffPortalView({
                   {report.status === 'pending' && report.notFoundNotified && (
                     <div className="rounded-lg bg-[#FEF3C7]/60 border border-[#FDE68A] px-3 py-2 text-[11px] font-semibold text-[#92400E] flex items-center justify-between gap-2">
                       <span>تم إشعار الطالب: لم يُعثر عليه حالياً (البلاغ لا يزال نشطاً)</span>
-                      {report.lastCheckedAt && (
+                      {formatStaffDate(report.lastCheckedAt, 'short') && (
                         <span className="font-normal text-[#92400E]/80 whitespace-nowrap">
-                          {new Intl.DateTimeFormat('ar', {
-                            dateStyle: 'short',
-                            timeStyle: 'short',
-                          }).format(new Date(report.lastCheckedAt))}
+                          {formatStaffDate(report.lastCheckedAt, 'short')}
                         </span>
                       )}
                     </div>
@@ -779,13 +866,9 @@ export function StaffPortalView({
                   ) : report.status === 'delivered' ? (
                     <div className="py-2.5 px-3 rounded-lg bg-[#F1F5F9] border border-[#E2E8F0] text-[#475569] text-xs font-semibold text-center space-y-0.5">
                       <p>تم التسليم بنجاح بالبطاقة الجامعية وإغلاق البلاغ</p>
-                      {report.deliveredAt && (
+                      {formatStaffDate(report.deliveredAt, 'medium') && (
                         <p className="font-normal text-slate-500">
-                          وقت التسليم:{' '}
-                          {new Intl.DateTimeFormat('ar', {
-                            dateStyle: 'medium',
-                            timeStyle: 'short',
-                          }).format(new Date(report.deliveredAt))}
+                          وقت التسليم: {formatStaffDate(report.deliveredAt, 'medium')}
                         </p>
                       )}
                     </div>

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'wisal-app-shell-v1';
+const CACHE_NAME = 'wisal-app-shell-v2';
 const APP_SHELL_URLS = [
   '/',
   '/index.html',
@@ -8,6 +8,14 @@ const APP_SHELL_URLS = [
   '/pwa-512x512.png',
   '/apple-touch-icon.png',
 ];
+
+const STATIC_IMAGE_PATHS = new Set([
+  '/icon.svg',
+  '/pwa-192x192.png',
+  '/pwa-512x512.png',
+  '/pwa-maskable-512x512.png',
+  '/apple-touch-icon.png',
+]);
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -71,6 +79,19 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
+  // استثناء ملفات التطوير في Vite وملف Service Worker نفسه لتجنب تعارض النسخ
+  if (
+    url.pathname === '/sw.js' ||
+    url.pathname.startsWith('/@') ||
+    url.pathname.startsWith('/src/') ||
+    url.pathname.startsWith('/node_modules/') ||
+    url.pathname === '/__vite_ping' ||
+    url.searchParams.has('v') ||
+    url.searchParams.has('t')
+  ) {
+    return;
+  }
+
   // تنقلات الصفحات: Network-First مع الرجوع إلى App Shell المخزّن عند انقطاع الشبكة
   if (request.mode === 'navigate') {
     event.respondWith(
@@ -91,11 +112,15 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // ملفات الواجهة الثابتة: Cache-First مع تحديث في الخلفية
-  event.respondWith(
-    caches.match(request).then((cachedResponse) => {
-      const networkFetch = fetch(request)
-        .then((networkResponse) => {
+  // حزم الإنتاج المجزّأة والأيقونات الثابتة: Cache-First
+  if (
+    url.pathname.startsWith('/assets/') ||
+    STATIC_IMAGE_PATHS.has(url.pathname)
+  ) {
+    event.respondWith(
+      caches.match(request).then((cachedResponse) => {
+        if (cachedResponse) return cachedResponse;
+        return fetch(request).then((networkResponse) => {
           if (networkResponse && networkResponse.ok) {
             const copy = networkResponse.clone();
             caches
@@ -103,11 +128,23 @@ self.addEventListener('fetch', (event) => {
               .then((cache) => cache.put(request, copy));
           }
           return networkResponse;
-        })
-        .catch(() => cachedResponse);
+        });
+      })
+    );
+    return;
+  }
 
-      return cachedResponse || networkFetch;
-    })
+  // بقية الملفات الثابتة (مثل manifest.json): Network-First
+  event.respondWith(
+    fetch(request)
+      .then((networkResponse) => {
+        if (networkResponse && networkResponse.ok) {
+          const copy = networkResponse.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
+        }
+        return networkResponse;
+      })
+      .catch(() => caches.match(request))
   );
 });
 

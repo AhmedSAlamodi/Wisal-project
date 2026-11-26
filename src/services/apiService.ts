@@ -6,8 +6,11 @@ import {
   type LostReportStatus,
   type MyReportEntry,
   type PushSubscriptionPayload,
+  type StaffAuthStatus,
+  type StaffSession,
   type StudentProfile,
   type UniversityFaculty,
+  type UpdateLostReportPayload,
 } from '../types/report';
 import {
   readSavedPushSubscription,
@@ -17,42 +20,17 @@ import {
 
 /**
  * إعدادات الاتصال بالخادم (API Configuration)
- * عند تجهيز خادم Node.js / Express، غيّر القيمة إلى true للتبديل التلقائي إلى طلبات fetch.
+ * استخدام المسارات النسبية يضمن التوافق المباشر مع Render وVercel والخادم الموحد.
  */
-export const USE_REMOTE_API = false;
-export const API_BASE_URL = 'http://localhost:5000/api/reports';
+export const USE_REMOTE_API = true;
+export const API_BASE_URL = '/api/reports';
+export const STAFF_API_BASE_URL = '/api/staff';
 
 /** الرقم الرسمي لمنصة «وصال الجامعي» */
 export const OFFICIAL_WHATSAPP_NUMBER = '967734918671';
 export const OFFICIAL_WHATSAPP_DISPLAY = '734918671';
 
-/**
- * رموز الدخول الأمنية المخصصة لمكاتب شؤون الطلاب في الكليات الـ 11
- */
-export const COLLEGE_ACCESS_CODES: Record<UniversityFaculty, string> = {
-  'كلية الطب والعلوم الصحية': 'MED@HU#2026!91',
-  'كلية الهندسة والبترول': 'ENG@PET#26!84',
-  'كلية الحاسبات وتقنية المعلومات': 'CIT@HU#2026!77',
-  'كلية العلوم': 'SCI@HU#2026!63',
-  'كلية العلوم الإدارية': 'ADM@HU#2026!58',
-  'كلية العلوم البيئية والأحياء البحرية': 'ENV@MAR#26!49',
-  'كلية التمريض': 'NUR@HU#2026!35',
-  'كلية الآداب': 'ART@HU#2026!29',
-  'كلية القانون': 'LAW@HU#2026!16',
-  'كلية البنات': 'GIR@HU#2026!94',
-  'كلية التربية – المكلا': 'EDU@MKL#26!82',
-};
-
-export function verifyStaffAccess(
-  college: UniversityFaculty,
-  accessCode: string
-): boolean {
-  const expected = COLLEGE_ACCESS_CODES[college];
-  if (!expected) return false;
-  return accessCode.trim() === expected;
-}
-
-const STORAGE_KEY = 'wisal_student_affairs_reports_v6';
+const OFFLINE_CACHE_KEY = 'wisal_student_affairs_reports_v6';
 const LEGACY_STORAGE_KEYS = [
   'wisal_student_affairs_reports_v1',
   'wisal_student_affairs_reports_v2',
@@ -63,12 +41,17 @@ const LEGACY_STORAGE_KEYS = [
 const MY_REPORTS_STORAGE_KEY = 'myReportIds';
 const STUDENT_FACULTY_STORAGE_KEY = 'studentFaculty';
 const STUDENT_PROFILE_STORAGE_KEY = 'wisal_student_profile_v1';
-const SIMULATED_NETWORK_DELAY_MS = 300;
+const LEGACY_STAFF_FACULTY_KEY = 'wisal_staff_faculty_v1';
 
-function simulateNetworkDelay(ms = SIMULATED_NETWORK_DELAY_MS): Promise<void> {
-  return new Promise((resolve) => {
-    window.setTimeout(resolve, ms);
-  });
+// توكن جلسة الموظف يُحفظ في الذاكرة فقط (لا يُخزن في localStorage أو sessionStorage)
+let inMemoryStaffToken: string | null = null;
+
+export function clearInMemoryStaffToken(): void {
+  inMemoryStaffToken = null;
+}
+
+export function hasInMemoryStaffToken(): boolean {
+  return Boolean(inMemoryStaffToken);
 }
 
 const STATUS_PRIORITY: Record<LostReportStatus, number> = {
@@ -138,24 +121,21 @@ function sortReports(reports: LostReport[]): LostReport[] {
 
 function migrateLegacyStorage(): void {
   try {
-    const hasLegacy = LEGACY_STORAGE_KEYS.some(
-      (key) => localStorage.getItem(key) !== null
-    );
-    if (hasLegacy) {
-      for (const key of LEGACY_STORAGE_KEYS) {
+    for (const key of LEGACY_STORAGE_KEYS) {
+      if (localStorage.getItem(key) !== null) {
         localStorage.removeItem(key);
       }
-      localStorage.removeItem(MY_REPORTS_STORAGE_KEY);
     }
+    sessionStorage.removeItem(LEGACY_STAFF_FACULTY_KEY);
   } catch {
     // تجاهل
   }
 }
 
-function readStorage(): LostReport[] {
+function readOfflineCache(): LostReport[] {
   migrateLegacyStorage();
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(OFFLINE_CACHE_KEY);
     if (!raw) {
       return [];
     }
@@ -165,7 +145,14 @@ function readStorage(): LostReport[] {
     }
     const validFaculties = new Set<string>(UNIVERSITY_FACULTIES);
     return (parsed as LostReport[])
-      .filter((r) => validFaculties.has(r.faculty))
+      .filter(
+        (r) =>
+          r &&
+          typeof r.id === 'string' &&
+          typeof r.reportCode === 'string' &&
+          typeof r.itemName === 'string' &&
+          validFaculties.has(r.faculty)
+      )
       .map((r) => ({
         ...r,
         isUrgent: Boolean(r.isUrgent) || detectUrgentItem(r.itemName),
@@ -175,9 +162,9 @@ function readStorage(): LostReport[] {
   }
 }
 
-function writeStorage(reports: LostReport[]): void {
+function writeOfflineCache(reports: LostReport[]): void {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(reports));
+    localStorage.setItem(OFFLINE_CACHE_KEY, JSON.stringify(reports));
   } catch {
     // تجاهل في حال تعذر التخزين
   }
@@ -201,6 +188,9 @@ export function readMyReportEntries(): MyReportEntry[] {
           return {
             id: item.id,
             ownedInBrowser: Boolean(item.ownedInBrowser),
+            ...(typeof item.ownerToken === 'string' && item.ownerToken
+              ? { ownerToken: item.ownerToken }
+              : {}),
           };
         }
         return null;
@@ -221,6 +211,9 @@ export function saveMyReportEntry(entry: MyReportEntry): MyReportEntry[] {
         ? {
             id: item.id,
             ownedInBrowser: item.ownedInBrowser || entry.ownedInBrowser,
+            ...(entry.ownerToken || item.ownerToken
+              ? { ownerToken: entry.ownerToken ?? item.ownerToken }
+              : {}),
           }
         : item
     );
@@ -251,6 +244,19 @@ export function clearMyReportEntries(): void {
   } catch {
     // تجاهل
   }
+}
+
+function toAsciiHeaderValue(value?: string): string | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  if (!trimmed || !/^[\x20-\x7E]+$/.test(trimmed)) return undefined;
+  return trimmed;
+}
+
+function getOwnerTokenForReport(reportId: string): string | undefined {
+  return toAsciiHeaderValue(
+    readMyReportEntries().find((e) => e.id === reportId)?.ownerToken
+  );
 }
 
 /**
@@ -493,105 +499,254 @@ export function triggerNotFoundBrowserNotification(report: LostReport): void {
   });
 }
 
-function extractReportSequence(reportCode: string): number {
-  const match = reportCode.match(/(\d+)$/);
-  return match ? Number.parseInt(match[1], 10) : 100;
+function buildAuthHeaders(extra?: Record<string, string>): Record<string, string> {
+  const headers: Record<string, string> = { ...(extra ?? {}) };
+  if (inMemoryStaffToken) {
+    headers.Authorization = `Bearer ${inMemoryStaffToken}`;
+  }
+  return headers;
+}
+
+async function parseJsonApiResponse<T>(
+  response: Response,
+  fallbackError: string
+): Promise<ApiResponse<T>> {
+  const contentType = response.headers.get('content-type') || '';
+  if (!contentType.includes('application/json')) {
+    return {
+      success: false,
+      data: null,
+      error:
+        response.status === 404
+          ? 'خدمة الخادم الخلفي غير متوفرة على هذا النطاق.'
+          : fallbackError,
+      statusCode: response.status,
+    };
+  }
+
+  let parsed: ApiResponse<T>;
+  try {
+    parsed = (await response.json()) as ApiResponse<T>;
+  } catch {
+    return {
+      success: false,
+      data: null,
+      error: fallbackError,
+      statusCode: response.status,
+    };
+  }
+
+  if (response.status === 401) {
+    inMemoryStaffToken = null;
+  }
+
+  if (!response.ok || !parsed.success) {
+    return {
+      success: false,
+      data: null,
+      error: parsed.error || fallbackError,
+      statusCode: response.status,
+    };
+  }
+
+  return {
+    ...parsed,
+    statusCode: response.status,
+  };
 }
 
 /**
- * طبقة إدارة البيانات غير المتزامنة (Async Service Layer)
- * جاهزة للاستبدال المباشر باستدعاءات fetch لـ Node.js/Express REST API.
+ * طبقة الاتصال بالخادم (REST API Service Layer)
  */
 export const apiService = {
-  async getReports(): Promise<ApiResponse<LostReport[]>> {
-    if (USE_REMOTE_API) {
-      try {
-        const response = await fetch(API_BASE_URL);
-        if (!response.ok) {
-          return {
-            success: false,
-            data: null,
-            error: 'تعذر جلب البلاغات من الخادم.',
-          };
-        }
-        return (await response.json()) as ApiResponse<LostReport[]>;
-      } catch {
-        return {
-          success: false,
-          data: null,
-          error: 'تعذر الاتصال بالخادم، يرجى التحقق من تشغيل خادم API.',
-        };
-      }
-    }
-
-    await simulateNetworkDelay();
+  async getStaffAuthStatus(
+    faculty: UniversityFaculty
+  ): Promise<ApiResponse<StaffAuthStatus>> {
     try {
-      const reports = sortReports(readStorage());
-      return {
-        success: true,
-        data: reports,
-        error: null,
-      };
+      const response = await fetch(
+        `${STAFF_API_BASE_URL}/status?faculty=${encodeURIComponent(faculty)}`
+      );
+      return await parseJsonApiResponse<StaffAuthStatus>(
+        response,
+        'تعذر التحقق من حالة دخول الكلية.'
+      );
     } catch {
       return {
         success: false,
         data: null,
-        error: 'حدث خطأ أثناء تحميل البلاغات.',
+        error: 'تعذر الاتصال بالخادم للتحقق من حالة الكلية.',
       };
     }
   },
 
-  async getReportByCode(
-    rawCode: string
-  ): Promise<ApiResponse<LostReport>> {
-    const normalizedCode = rawCode.trim().toUpperCase();
-
-    if (USE_REMOTE_API) {
-      try {
-        const response = await fetch(
-          `${API_BASE_URL}/code/${encodeURIComponent(normalizedCode)}`
-        );
-        const result = (await response.json()) as ApiResponse<LostReport>;
-        if (!response.ok || !result.success) {
-          return {
-            success: false,
-            data: null,
-            error: result.error || 'لم يتم العثور على بلاغ بهذا الرقم.',
-          };
-        }
-        return result;
-      } catch {
-        return {
-          success: false,
-          data: null,
-          error: 'تعذر البحث عن البلاغ من الخادم.',
-        };
-      }
-    }
-
-    await simulateNetworkDelay();
+  async setupStaffPasscode(
+    faculty: UniversityFaculty,
+    passcode: string
+  ): Promise<ApiResponse<StaffSession>> {
     try {
-      const reports = readStorage();
-      const found = reports.find(
-        (r) => r.reportCode.toUpperCase() === normalizedCode
+      const response = await fetch(`${STAFF_API_BASE_URL}/setup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ faculty, passcode }),
+      });
+      const result = await parseJsonApiResponse<StaffSession>(
+        response,
+        'تعذر إعداد رمز دخول الكلية.'
       );
-      if (!found) {
-        return {
-          success: false,
-          data: null,
-          error: `لا يوجد بلاغ مسجل برقم (${normalizedCode}). تأكد من كتابة الرقم مثل WS-101.`,
-        };
+      if (result.success && result.data?.token) {
+        inMemoryStaffToken = result.data.token;
       }
-      return {
-        success: true,
-        data: found,
-        error: null,
-      };
+      return result;
     } catch {
       return {
         success: false,
         data: null,
-        error: 'حدث خطأ أثناء البحث عن رقم البلاغ.',
+        error: 'تعذر الاتصال بالخادم أثناء إعداد رمز الكلية.',
+      };
+    }
+  },
+
+  async staffLogin(
+    faculty: UniversityFaculty,
+    passcode: string
+  ): Promise<ApiResponse<StaffSession>> {
+    try {
+      const response = await fetch(`${STAFF_API_BASE_URL}/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ faculty, passcode }),
+      });
+      const result = await parseJsonApiResponse<StaffSession>(
+        response,
+        'تعذر تسجيل الدخول لبوابة المكتب.'
+      );
+      if (result.success && result.data?.token) {
+        inMemoryStaffToken = result.data.token;
+      }
+      return result;
+    } catch {
+      return {
+        success: false,
+        data: null,
+        error: 'تعذر الاتصال بالخادم أثناء تسجيل الدخول.',
+      };
+    }
+  },
+
+  async getStaffSession(): Promise<
+    ApiResponse<{ faculty: UniversityFaculty; expiresAt: string }>
+  > {
+    if (!inMemoryStaffToken) {
+      return {
+        success: false,
+        data: null,
+        error: 'لا توجد جلسة نشطة.',
+        statusCode: 401,
+      };
+    }
+    try {
+      const response = await fetch(`${STAFF_API_BASE_URL}/session`, {
+        headers: buildAuthHeaders(),
+      });
+      return await parseJsonApiResponse<{
+        faculty: UniversityFaculty;
+        expiresAt: string;
+      }>(response, 'انتهت جلسة الموظف.');
+    } catch {
+      return {
+        success: false,
+        data: null,
+        error: 'تعذر التحقق من الجلسة.',
+      };
+    }
+  },
+
+  async staffLogout(): Promise<void> {
+    const token = inMemoryStaffToken;
+    inMemoryStaffToken = null;
+    if (!token) return;
+    try {
+      await fetch(`${STAFF_API_BASE_URL}/logout`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+    } catch {
+      // تجاهل
+    }
+  },
+
+  async getReports(): Promise<ApiResponse<LostReport[]>> {
+    if (!USE_REMOTE_API) {
+      return {
+        success: true,
+        data: sortReports(readOfflineCache()),
+        error: null,
+      };
+    }
+
+    try {
+      const myEntries = readMyReportEntries()
+        .map((e) => ({
+          id: toAsciiHeaderValue(e.id) || '',
+          ownerToken: toAsciiHeaderValue(e.ownerToken) || '',
+        }))
+        .filter((e) => Boolean(e.id))
+        .slice(0, 100);
+      const headers = buildAuthHeaders(
+        !inMemoryStaffToken && myEntries.length > 0
+          ? { 'X-Wisal-My-Reports': JSON.stringify(myEntries) }
+          : undefined
+      );
+
+      const response = await fetch(API_BASE_URL, { headers });
+      const result = await parseJsonApiResponse<LostReport[]>(
+        response,
+        'تعذر جلب البلاغات من الخادم.'
+      );
+      if (result.success && result.data) {
+        if (!inMemoryStaffToken) {
+          writeOfflineCache(result.data);
+        }
+        return {
+          ...result,
+          data: sortReports(result.data),
+        };
+      }
+      return result;
+    } catch {
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        return {
+          success: true,
+          data: sortReports(readOfflineCache()),
+          error: null,
+        };
+      }
+      return {
+        success: false,
+        data: null,
+        error: 'تعذر الاتصال بالخادم، يرجى المحاولة مجدداً.',
+      };
+    }
+  },
+
+  async getReportByCode(rawCode: string): Promise<ApiResponse<LostReport>> {
+    const normalizedCode = rawCode.trim().toUpperCase();
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/code/${encodeURIComponent(normalizedCode)}`,
+        {
+          headers: buildAuthHeaders(),
+        }
+      );
+      return await parseJsonApiResponse<LostReport>(
+        response,
+        'لم يتم العثور على بلاغ بهذا الرقم.'
+      );
+    } catch {
+      return {
+        success: false,
+        data: null,
+        error: 'تعذر البحث عن البلاغ من الخادم.',
       };
     }
   },
@@ -602,236 +757,118 @@ export const apiService = {
   ): Promise<ApiResponse<PushSubscriptionPayload>> {
     savePushSubscriptionLocally(subscription);
 
-    if (USE_REMOTE_API) {
-      try {
-        const response = await fetch(`${API_BASE_URL}/push-subscribe`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ subscription, reportIds }),
-        });
-        const result =
-          (await response.json()) as ApiResponse<PushSubscriptionPayload>;
-        if (!response.ok || !result.success) {
-          return {
-            success: false,
-            data: null,
-            error: result.error || 'تعذر حفظ اشتراك الإشعارات على الخادم.',
-          };
-        }
-        return result;
-      } catch {
-        return {
-          success: false,
-          data: null,
-          error: 'تعذر الاتصال بالخادم لتسجيل اشتراك الإشعارات.',
-        };
-      }
-    }
+    try {
+      const entryMap = new Map(
+        readMyReportEntries().map((e) => [e.id, e.ownerToken || ''])
+      );
+      const reports = reportIds
+        .map((id) => ({ id, ownerToken: entryMap.get(id) || '' }))
+        .filter((r) => Boolean(r.ownerToken));
 
-    // ربط الاشتراك بالبلاغات المحلية النشطة للطالب لتكون جاهزة للمزامنة مع الخادم
-    if (reportIds.length > 0) {
-      try {
-        const existing = readStorage();
-        const idSet = new Set(reportIds);
-        const updated = existing.map((report) =>
-          idSet.has(report.id)
-            ? { ...report, pushSubscription: subscription }
-            : report
-        );
-        writeStorage(updated);
-      } catch {
-        // تجاهل
-      }
+      const response = await fetch(`${API_BASE_URL}/push-subscribe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subscription, reports }),
+      });
+      return await parseJsonApiResponse<PushSubscriptionPayload>(
+        response,
+        'تعذر حفظ اشتراك الإشعارات على الخادم.'
+      );
+    } catch {
+      return {
+        success: false,
+        data: null,
+        error: 'تعذر الاتصال بالخادم لتسجيل اشتراك الإشعارات.',
+      };
     }
-
-    return {
-      success: true,
-      data: subscription,
-      error: null,
-    };
   },
 
   async createReport(
     payload: CreateLostReportPayload
   ): Promise<ApiResponse<LostReport>> {
     const cleanPhone = sanitizePhoneNumber(payload.phoneNumber);
-    const isUrgent = detectUrgentItem(payload.itemName);
     const pushSubscription =
       payload.pushSubscription ?? readSavedPushSubscription();
 
-    if (USE_REMOTE_API) {
-      try {
-        const response = await fetch(API_BASE_URL, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            ...payload,
-            phoneNumber: cleanPhone,
-            isUrgent,
-            pushSubscription,
-          }),
-        });
-        const result = (await response.json()) as ApiResponse<LostReport>;
-        if (!response.ok || !result.success) {
-          return {
-            success: false,
-            data: null,
-            error: result.error || 'تعذر حفظ البلاغ على الخادم.',
-          };
-        }
-        if (result.data) {
-          saveStudentProfile({
-            studentFaculty: result.data.faculty,
-            studentName: result.data.studentName,
-            phoneNumber: result.data.phoneNumber,
-          });
-        }
-        return result;
-      } catch {
-        return {
-          success: false,
-          data: null,
-          error: 'فشل الاتصال بالخادم أثناء إرسال البلاغ.',
-        };
-      }
-    }
-
-    await simulateNetworkDelay();
     try {
-      const existing = readStorage();
-      const conflictReport = existing.find(
-        (item) =>
-          sanitizePhoneNumber(item.phoneNumber) === cleanPhone &&
-          item.faculty !== payload.faculty
-      );
-      if (conflictReport) {
-        return {
-          success: false,
-          data: null,
-          error: `عذراً، هذا الرقم مسجل مسبقاً في ${conflictReport.faculty} ولا يمكن رفع بلاغات في أكثر من كلية`,
-        };
-      }
-
-      const maxSeq = existing.reduce((max, item) => {
-        const seq = extractReportSequence(item.reportCode);
-        return seq > max ? seq : max;
-      }, 100);
-
-      const nextSeq = maxSeq + 1;
-      const reportCode = `WS-${nextSeq}`;
-      const newReport: LostReport = {
-        id: `ws-${nextSeq}-${Date.now()}`,
-        reportCode,
-        studentName: payload.studentName.trim(),
-        itemName: payload.itemName.trim(),
-        description: payload.description.trim(),
-        faculty: payload.faculty,
-        locationType: payload.locationType,
-        roomOrLocation: payload.roomOrLocation.trim(),
-        timePeriod: payload.timePeriod.trim(),
-        phoneNumber: cleanPhone,
-        isUrgent,
-        status: 'pending',
-        createdAt: new Date().toISOString(),
-        pushSubscription,
-      };
-
-      const updated = [newReport, ...existing];
-      writeStorage(updated);
-      saveStudentProfile({
-        studentFaculty: newReport.faculty,
-        studentName: newReport.studentName,
-        phoneNumber: newReport.phoneNumber,
+      const response = await fetch(API_BASE_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...payload,
+          phoneNumber: cleanPhone,
+          pushSubscription,
+        }),
       });
-
-      return {
-        success: true,
-        data: newReport,
-        error: null,
-      };
+      const result = await parseJsonApiResponse<LostReport>(
+        response,
+        'تعذر حفظ البلاغ على الخادم.'
+      );
+      if (result.success && result.data) {
+        saveStudentProfile({
+          studentFaculty: result.data.faculty,
+          studentName: result.data.studentName,
+          phoneNumber: result.data.phoneNumber,
+        });
+      }
+      return result;
     } catch {
       return {
         success: false,
         data: null,
-        error: 'تعذر حفظ البلاغ في التخزين المحلي.',
+        error: 'فشل الاتصال بالخادم أثناء إرسال البلاغ.',
+      };
+    }
+  },
+
+  async updateReport(
+    reportId: string,
+    payload: UpdateLostReportPayload
+  ): Promise<ApiResponse<LostReport>> {
+    const ownerToken = getOwnerTokenForReport(reportId);
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/${encodeURIComponent(reportId)}`,
+        {
+          method: 'PATCH',
+          headers: buildAuthHeaders({
+            'Content-Type': 'application/json',
+            ...(ownerToken ? { 'X-Wisal-Owner-Token': ownerToken } : {}),
+          }),
+          body: JSON.stringify(payload),
+        }
+      );
+      return await parseJsonApiResponse<LostReport>(
+        response,
+        'تعذر تحديث بيانات البلاغ.'
+      );
+    } catch {
+      return {
+        success: false,
+        data: null,
+        error: 'تعذر الاتصال بالخادم أثناء تعديل البلاغ.',
       };
     }
   },
 
   async markAsMatched(id: string): Promise<ApiResponse<LostReport>> {
-    if (USE_REMOTE_API) {
-      try {
-        const response = await fetch(`${API_BASE_URL}/${id}/match`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-        });
-        const result = (await response.json()) as ApiResponse<LostReport>;
-        if (!response.ok || !result.success) {
-          return {
-            success: false,
-            data: null,
-            error: result.error || 'تعذر تحديث حالة البلاغ.',
-          };
-        }
-        return result;
-      } catch {
-        return {
-          success: false,
-          data: null,
-          error: 'تعذر الاتصال بالخادم أثناء تحديث الحالة.',
-        };
-      }
-    }
-
-    await simulateNetworkDelay();
     try {
-      const existing = readStorage();
-      const index = existing.findIndex((r) => r.id === id);
-
-      if (index === -1) {
-        return {
-          success: false,
-          data: null,
-          error: 'لم يتم العثور على البلاغ المطلوب.',
-        };
-      }
-
-      const target = existing[index];
-      if (target.status !== 'pending') {
-        return {
-          success: false,
-          data: null,
-          error: 'يمكن تأكيد العثور على الغرض للبلاغات التي لا تزال قيد المراجعة فقط.',
-        };
-      }
-
-      const nowIso = new Date().toISOString();
-      const updatedReport: LostReport = {
-        ...target,
-        status: 'matched',
-        matchedAt: nowIso,
-        notification: {
-          type: 'matched',
-          message: `غرضك «${target.itemName}» (بلاغ ${target.reportCode}) موجود الآن في مكتب شؤون الطلاب بـ (${target.faculty}). يرجى إحضار البطاقة الجامعية ورقم البلاغ عند الاستلام.`,
-          createdAt: nowIso,
-          unread: true,
-        },
-      };
-
-      const updated = [...existing];
-      updated[index] = updatedReport;
-      writeStorage(updated);
-
-      return {
-        success: true,
-        data: updatedReport,
-        error: null,
-      };
+      const response = await fetch(
+        `${API_BASE_URL}/${encodeURIComponent(id)}/match`,
+        {
+          method: 'PATCH',
+          headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
+        }
+      );
+      return await parseJsonApiResponse<LostReport>(
+        response,
+        'تعذر تحديث حالة البلاغ.'
+      );
     } catch {
       return {
         success: false,
         data: null,
-        error: 'تعذر تحديث حالة البلاغ إلى موجود بالمكتب.',
+        error: 'تعذر الاتصال بالخادم أثناء تحديث الحالة.',
       };
     }
   },
@@ -839,160 +876,45 @@ export const apiService = {
   async resendPickupReminder(
     reportId: string
   ): Promise<ApiResponse<LostReport>> {
-    if (USE_REMOTE_API) {
-      try {
-        const response = await fetch(
-          `${API_BASE_URL}/${reportId}/pickup-reminder`,
-          {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-          }
-        );
-        const result = (await response.json()) as ApiResponse<LostReport>;
-        if (!response.ok || !result.success) {
-          return {
-            success: false,
-            data: null,
-            error: result.error || 'تعذر إرسال تذكير الاستلام.',
-          };
-        }
-        return result;
-      } catch {
-        return {
-          success: false,
-          data: null,
-          error: 'تعذر الاتصال بالخادم أثناء إرسال تذكير الاستلام.',
-        };
-      }
-    }
-
-    await simulateNetworkDelay();
     try {
-      const existing = readStorage();
-      const index = existing.findIndex((r) => r.id === reportId);
-      if (index === -1) {
-        return {
-          success: false,
-          data: null,
-          error: 'لم يتم العثور على البلاغ المطلوب.',
-        };
-      }
-
-      const target = existing[index];
-      if (target.status !== 'matched') {
-        return {
-          success: false,
-          data: null,
-          error: 'يُتاح إرسال تذكير الاستلام للبلاغات الموجودة بالمكتب فقط.',
-        };
-      }
-
-      const nowIso = new Date().toISOString();
-      const updatedReport: LostReport = {
-        ...target,
-        notification: {
-          type: 'matched',
-          message: `تذكير بالاستلام: غرضك «${target.itemName}» (بلاغ ${target.reportCode}) لا يزال بانتظارك في مكتب شؤون الطلاب بـ (${target.faculty}). يرجى الحضور شخصياً وإبراز البطاقة الجامعية للاستلام.`,
-          createdAt: nowIso,
-          unread: true,
-        },
-      };
-
-      const updated = [...existing];
-      updated[index] = updatedReport;
-      writeStorage(updated);
-
-      return {
-        success: true,
-        data: updatedReport,
-        error: null,
-      };
+      const response = await fetch(
+        `${API_BASE_URL}/${encodeURIComponent(reportId)}/pickup-reminder`,
+        {
+          method: 'PATCH',
+          headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
+        }
+      );
+      return await parseJsonApiResponse<LostReport>(
+        response,
+        'تعذر إرسال تذكير الاستلام.'
+      );
     } catch {
       return {
         success: false,
         data: null,
-        error: 'تعذر حفظ تذكير الاستلام.',
+        error: 'تعذر الاتصال بالخادم أثناء إرسال تذكير الاستلام.',
       };
     }
   },
 
   async notifyNotFoundYet(reportId: string): Promise<ApiResponse<LostReport>> {
-    if (USE_REMOTE_API) {
-      try {
-        const response = await fetch(
-          `${API_BASE_URL}/${reportId}/notify-not-found`,
-          {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-          }
-        );
-        const result = (await response.json()) as ApiResponse<LostReport>;
-        if (!response.ok || !result.success) {
-          return {
-            success: false,
-            data: null,
-            error: result.error || 'تعذر تسجيل إشعار عدم العثور على الغرض.',
-          };
-        }
-        return result;
-      } catch {
-        return {
-          success: false,
-          data: null,
-          error: 'تعذر الاتصال بالخادم أثناء تسجيل الإشعار.',
-        };
-      }
-    }
-
-    await simulateNetworkDelay();
     try {
-      const existing = readStorage();
-      const index = existing.findIndex((r) => r.id === reportId);
-      if (index === -1) {
-        return {
-          success: false,
-          data: null,
-          error: 'لم يتم العثور على البلاغ المطلوب.',
-        };
-      }
-
-      const target = existing[index];
-      if (target.status !== 'pending') {
-        return {
-          success: false,
-          data: null,
-          error: 'لا يمكن إرسال إشعار عدم العثور على الغرض بعد تأكيد وجوده أو إغلاقه.',
-        };
-      }
-
-      const nowIso = new Date().toISOString();
-      const updatedReport: LostReport = {
-        ...target,
-        status: 'pending',
-        notFoundNotified: true,
-        lastCheckedAt: nowIso,
-        notification: {
-          type: 'not_found',
-          message: NOT_FOUND_NOTIFICATION_MESSAGE,
-          createdAt: nowIso,
-          unread: true,
-        },
-      };
-
-      const updated = [...existing];
-      updated[index] = updatedReport;
-      writeStorage(updated);
-
-      return {
-        success: true,
-        data: updatedReport,
-        error: null,
-      };
+      const response = await fetch(
+        `${API_BASE_URL}/${encodeURIComponent(reportId)}/notify-not-found`,
+        {
+          method: 'PATCH',
+          headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
+        }
+      );
+      return await parseJsonApiResponse<LostReport>(
+        response,
+        'تعذر تسجيل إشعار عدم العثور على الغرض.'
+      );
     } catch {
       return {
         success: false,
         data: null,
-        error: 'تعذر حفظ إشعار مراجعة البلاغ.',
+        error: 'تعذر الاتصال بالخادم أثناء تسجيل الإشعار.',
       };
     }
   },
@@ -1000,246 +922,110 @@ export const apiService = {
   async markNotificationAsRead(
     reportId: string
   ): Promise<ApiResponse<LostReport>> {
-    if (USE_REMOTE_API) {
-      try {
-        const response = await fetch(
-          `${API_BASE_URL}/${reportId}/notification-read`,
-          {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-          }
-        );
-        const result = (await response.json()) as ApiResponse<LostReport>;
-        if (!response.ok || !result.success) {
-          return {
-            success: false,
-            data: null,
-            error: result.error || 'تعذر تحديث حالة قراءة الإشعار.',
-          };
-        }
-        return result;
-      } catch {
-        return {
-          success: false,
-          data: null,
-          error: 'تعذر الاتصال بالخادم لتحديث الإشعار.',
-        };
-      }
-    }
-
+    const ownerToken = getOwnerTokenForReport(reportId);
     try {
-      const existing = readStorage();
-      const index = existing.findIndex((r) => r.id === reportId);
-      if (index === -1) {
-        return {
-          success: false,
-          data: null,
-          error: 'لم يتم العثور على البلاغ المطلوب.',
-        };
-      }
-
-      const target = existing[index];
-      const nowIso = new Date().toISOString();
-      const updatedReport: LostReport = {
-        ...target,
-        notification: target.notification
-          ? {
-              ...target.notification,
-              unread: false,
-              readAt: nowIso,
-            }
-          : {
-              type: target.status === 'matched' ? 'matched' : 'not_found',
-              message:
-                target.status === 'matched'
-                  ? `غرضك «${target.itemName}» موجود بالمكتب. يرجى إحضار البطاقة الجامعية ورقم البلاغ عند الاستلام.`
-                  : NOT_FOUND_NOTIFICATION_MESSAGE,
-              createdAt: target.matchedAt || target.lastCheckedAt || nowIso,
-              unread: false,
-              readAt: nowIso,
-            },
-      };
-
-      const updated = [...existing];
-      updated[index] = updatedReport;
-      writeStorage(updated);
-
-      return {
-        success: true,
-        data: updatedReport,
-        error: null,
-      };
+      const response = await fetch(
+        `${API_BASE_URL}/${encodeURIComponent(reportId)}/notification-read`,
+        {
+          method: 'PATCH',
+          headers: buildAuthHeaders({
+            'Content-Type': 'application/json',
+            ...(ownerToken ? { 'X-Wisal-Owner-Token': ownerToken } : {}),
+          }),
+        }
+      );
+      return await parseJsonApiResponse<LostReport>(
+        response,
+        'تعذر تحديث حالة قراءة الإشعار.'
+      );
     } catch {
       return {
         success: false,
         data: null,
-        error: 'تعذر حفظ حالة قراءة التنبيه.',
+        error: 'تعذر الاتصال بالخادم لتحديث الإشعار.',
       };
     }
   },
 
   async confirmDelivery(reportId: string): Promise<ApiResponse<LostReport>> {
-    if (USE_REMOTE_API) {
-      try {
-        const response = await fetch(`${API_BASE_URL}/${reportId}/deliver`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ verifiedByUniversityId: true }),
-        });
-        const result = (await response.json()) as ApiResponse<LostReport>;
-        if (!response.ok || !result.success) {
-          return {
-            success: false,
-            data: null,
-            error: result.error || 'تعذر تأكيد التسليم النهائي.',
-          };
-        }
-        return result;
-      } catch {
-        return {
-          success: false,
-          data: null,
-          error: 'تعذر الاتصال بالخادم أثناء تأكيد التسليم.',
-        };
-      }
-    }
-
-    await simulateNetworkDelay();
     try {
-      const existing = readStorage();
-      const index = existing.findIndex((r) => r.id === reportId);
-
-      if (index === -1) {
-        return {
-          success: false,
-          data: null,
-          error: 'لم يتم العثور على البلاغ المطلوب.',
-        };
-      }
-
-      const target = existing[index];
-      if (target.status !== 'matched') {
-        return {
-          success: false,
-          data: null,
-          error: 'يجب أولاً تأكيد العثور على الغرض بالمكتب قبل تسجيل التسليم النهائي.',
-        };
-      }
-
-      const nowIso = new Date().toISOString();
-      const updatedReport: LostReport = {
-        ...target,
-        status: 'delivered',
-        deliveredAt: nowIso,
-        notification: target.notification
-          ? {
-              ...target.notification,
-              unread: false,
-              readAt: target.notification.readAt ?? nowIso,
-            }
-          : undefined,
-      };
-
-      const updated = [...existing];
-      updated[index] = updatedReport;
-      writeStorage(updated);
-
-      return {
-        success: true,
-        data: updatedReport,
-        error: null,
-      };
+      const response = await fetch(
+        `${API_BASE_URL}/${encodeURIComponent(reportId)}/deliver`,
+        {
+          method: 'PATCH',
+          headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
+          body: JSON.stringify({ verifiedByUniversityId: true }),
+        }
+      );
+      return await parseJsonApiResponse<LostReport>(
+        response,
+        'تعذر تأكيد التسليم النهائي.'
+      );
     } catch {
       return {
         success: false,
         data: null,
-        error: 'حدث خطأ أثناء تأكيد تسليم الغرض.',
+        error: 'تعذر الاتصال بالخادم أثناء تأكيد التسليم.',
       };
     }
   },
 
   async cancelReport(reportId: string): Promise<ApiResponse<LostReport>> {
-    if (USE_REMOTE_API) {
-      try {
-        const response = await fetch(`${API_BASE_URL}/${reportId}/cancel`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-        });
-        const result = (await response.json()) as ApiResponse<LostReport>;
-        if (!response.ok || !result.success) {
-          return {
-            success: false,
-            data: null,
-            error: result.error || 'تعذر سحب البلاغ.',
-          };
-        }
-        return result;
-      } catch {
-        return {
-          success: false,
-          data: null,
-          error: 'تعذر الاتصال بالخادم أثناء سحب البلاغ.',
-        };
-      }
-    }
-
-    await simulateNetworkDelay();
+    const ownerToken = getOwnerTokenForReport(reportId);
     try {
-      const existing = readStorage();
-      const index = existing.findIndex((r) => r.id === reportId);
-
-      if (index === -1) {
-        return {
-          success: false,
-          data: null,
-          error: 'لم يتم العثور على البلاغ المطلوب.',
-        };
-      }
-
-      const target = existing[index];
-      if (target.status !== 'pending') {
-        return {
-          success: false,
-          data: null,
-          error:
-            target.status === 'matched'
-              ? 'لا يمكن سحب البلاغ بعد العثور على الغرض؛ يرجى الحضور شخصياً لمكتب شؤون الطلاب مع البطاقة الجامعية للاستلام.'
-              : 'لا يمكن سحب هذا البلاغ في حالته الحالية.',
-        };
-      }
-
-      const updatedReport: LostReport = {
-        ...target,
-        status: 'cancelled',
-        cancelledAt: new Date().toISOString(),
-      };
-
-      const updated = [...existing];
-      updated[index] = updatedReport;
-      writeStorage(updated);
-
-      return {
-        success: true,
-        data: updatedReport,
-        error: null,
-      };
+      const response = await fetch(
+        `${API_BASE_URL}/${encodeURIComponent(reportId)}/cancel`,
+        {
+          method: 'PATCH',
+          headers: buildAuthHeaders({
+            'Content-Type': 'application/json',
+            ...(ownerToken ? { 'X-Wisal-Owner-Token': ownerToken } : {}),
+          }),
+        }
+      );
+      return await parseJsonApiResponse<LostReport>(
+        response,
+        'تعذر سحب البلاغ.'
+      );
     } catch {
       return {
         success: false,
         data: null,
-        error: 'حدث خطأ أثناء سحب البلاغ.',
+        error: 'تعذر الاتصال بالخادم أثناء سحب البلاغ.',
+      };
+    }
+  },
+
+  async deleteReport(
+    reportId: string
+  ): Promise<ApiResponse<{ deletedId: string }>> {
+    const ownerToken = getOwnerTokenForReport(reportId);
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/${encodeURIComponent(reportId)}`,
+        {
+          method: 'DELETE',
+          headers: buildAuthHeaders(
+            ownerToken ? { 'X-Wisal-Owner-Token': ownerToken } : undefined
+          ),
+        }
+      );
+      return await parseJsonApiResponse<{ deletedId: string }>(
+        response,
+        'تعذر حذف البلاغ.'
+      );
+    } catch {
+      return {
+        success: false,
+        data: null,
+        error: 'تعذر الاتصال بالخادم أثناء حذف البلاغ.',
       };
     }
   },
 
   async clearAllReports(): Promise<ApiResponse<LostReport[]>> {
-    if (USE_REMOTE_API) {
-      return this.getReports();
-    }
-
-    await simulateNetworkDelay();
     try {
-      localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem(OFFLINE_CACHE_KEY);
       for (const key of LEGACY_STORAGE_KEYS) {
         localStorage.removeItem(key);
       }

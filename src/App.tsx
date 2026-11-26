@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Loader2, MessageCircle, Trash2, WifiOff } from 'lucide-react';
 import { MyReportsView } from './components/MyReportsView';
 import { Navigation } from './components/Navigation';
@@ -13,6 +13,8 @@ import { Toast, type ToastState, type ToastVariant } from './components/Toast';
 import {
   apiService,
   buildOfficialWhatsAppUrl,
+  clearInMemoryStaffToken,
+  hasInMemoryStaffToken,
   OFFICIAL_WHATSAPP_DISPLAY,
   readMyReportEntries,
   readStudentProfile,
@@ -23,20 +25,20 @@ import {
   triggerPickupReminderBrowserNotification,
 } from './services/apiService';
 import { useOnlineStatus } from './services/pwaService';
-import {
-  UNIVERSITY_FACULTIES,
-  type AppMode,
-  type CreateLostReportPayload,
-  type LostReport,
-  type MyReportEntry,
-  type StudentProfile,
-  type StudentTab,
-  type UniversityFaculty,
+import type {
+  AppMode,
+  CreateLostReportPayload,
+  LostReport,
+  MyReportEntry,
+  StudentProfile,
+  StudentTab,
+  UniversityFaculty,
+  UpdateLostReportPayload,
 } from './types/report';
 
 const APP_MODE_KEY = 'wisal_app_mode_v1';
 const STUDENT_TAB_KEY = 'wisal_student_tab_v1';
-const STAFF_FACULTY_KEY = 'wisal_staff_faculty_v1';
+const LEGACY_STAFF_FACULTY_KEY = 'wisal_staff_faculty_v1';
 
 export default function App() {
   const [myReportEntries, setMyReportEntries] = useState<MyReportEntry[]>(() =>
@@ -90,31 +92,14 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }, []);
 
-  const [staffFaculty, setStaffFacultyState] =
-    useState<UniversityFaculty | null>(() => {
-      try {
-        const saved = sessionStorage.getItem(STAFF_FACULTY_KEY);
-        if (
-          saved &&
-          UNIVERSITY_FACULTIES.includes(saved as UniversityFaculty)
-        ) {
-          return saved as UniversityFaculty;
-        }
-        if (saved) sessionStorage.removeItem(STAFF_FACULTY_KEY);
-        return null;
-      } catch {
-        return null;
-      }
-    });
+  // جلسة الموظف تُحفظ في الذاكرة فقط وتُوثّق عبر الخادم
+  const [staffFaculty, setStaffFaculty] = useState<UniversityFaculty | null>(
+    null
+  );
 
-  const setStaffFaculty = useCallback((faculty: UniversityFaculty | null) => {
-    setStaffFacultyState(faculty);
+  useEffect(() => {
     try {
-      if (faculty) {
-        sessionStorage.setItem(STAFF_FACULTY_KEY, faculty);
-      } else {
-        sessionStorage.removeItem(STAFF_FACULTY_KEY);
-      }
+      sessionStorage.removeItem(LEGACY_STAFF_FACULTY_KEY);
     } catch {
       // تجاهل
     }
@@ -122,6 +107,7 @@ export default function App() {
 
   const [reports, setReports] = useState<LostReport[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [isResetting, setIsResetting] = useState(false);
 
   const [notifyModalState, setNotifyModalState] = useState<{
@@ -147,25 +133,78 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
-  const fetchReports = useCallback(async () => {
-    setIsLoading(true);
-    const response = await apiService.getReports();
-    if (response.success && response.data) {
-      setReports(response.data);
-    } else {
+  const handleUnauthorizedSession = useCallback(
+    (message?: string) => {
+      clearInMemoryStaffToken();
+      setStaffFaculty(null);
       showToast(
-        response.error || 'تعذر تحميل البيانات، يرجى المحاولة مجدداً.',
+        message || 'انتهت جلسة بوابة المكتب، يرجى تسجيل الدخول مجدداً.',
         'error'
       );
-    }
-    setIsLoading(false);
-  }, [showToast]);
+    },
+    [showToast]
+  );
+
+  const staffFacultyRef = useRef<UniversityFaculty | null>(staffFaculty);
+  useEffect(() => {
+    staffFacultyRef.current = staffFaculty;
+  }, [staffFaculty]);
+
+  const fetchReports = useCallback(
+    async (options?: { silent?: boolean }) => {
+      if (options?.silent) {
+        setIsRefreshing(true);
+      } else {
+        setIsLoading(true);
+      }
+      const response = await apiService.getReports();
+      if (response.success && response.data) {
+        setReports(response.data);
+      } else if (response.statusCode === 401 && staffFacultyRef.current) {
+        handleUnauthorizedSession(response.error || undefined);
+      } else if (!options?.silent) {
+        showToast(
+          response.error || 'تعذر تحميل البيانات، يرجى المحاولة مجدداً.',
+          'error'
+        );
+      }
+      setIsLoading(false);
+      setIsRefreshing(false);
+    },
+    [handleUnauthorizedSession, showToast]
+  );
 
   useEffect(() => {
     void fetchReports();
   }, [fetchReports]);
 
   const isOnline = useOnlineStatus();
+  const lastSyncRef = useRef<number>(0);
+
+  useEffect(() => {
+    const syncIfNeeded = () => {
+      const now = Date.now();
+      if (now - lastSyncRef.current < 4000) return;
+      lastSyncRef.current = now;
+      void fetchReports({ silent: true });
+    };
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        syncIfNeeded();
+      }
+    };
+    const handleOnline = () => {
+      syncIfNeeded();
+    };
+
+    document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('online', handleOnline);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('online', handleOnline);
+    };
+  }, [fetchReports]);
 
   useEffect(() => {
     if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) {
@@ -216,13 +255,14 @@ export default function App() {
       showToast(msg, 'error');
       throw new Error(msg);
     }
-    const created = response.data;
+    const { ownerToken, ...created } = response.data;
     setReports((prev) => [created, ...prev]);
 
     // حفظ البلاغ تلقائياً في سجل بلاغات الطالب الخاصة (myReportIds) وتحديث الكلية الأساسية
     const updatedEntries = saveMyReportEntry({
       id: created.id,
       ownedInBrowser: true,
+      ...(ownerToken ? { ownerToken } : {}),
     });
     setMyReportEntries(updatedEntries);
     setStudentProfile(readStudentProfile());
@@ -232,6 +272,41 @@ export default function App() {
       'success'
     );
     return created;
+  };
+
+  const handleUpdateReport = async (
+    reportId: string,
+    payload: UpdateLostReportPayload
+  ) => {
+    const response = await apiService.updateReport(reportId, payload);
+    if (!response.success || !response.data) {
+      const msg = response.error || 'تعذر تحديث بيانات البلاغ.';
+      showToast(msg, 'error');
+      throw new Error(msg);
+    }
+
+    const updated = response.data;
+    setReports((prev) =>
+      prev.map((item) => (item.id === updated.id ? updated : item))
+    );
+    showToast(`تم تحديث بيانات البلاغ (${updated.reportCode}) بنجاح.`, 'success');
+  };
+
+  const handleDeleteReport = async (reportId: string) => {
+    const response = await apiService.deleteReport(reportId);
+    if (!response.success) {
+      if (response.statusCode === 401 && staffFaculty) {
+        handleUnauthorizedSession(response.error || undefined);
+      } else {
+        showToast(response.error || 'تعذر حذف البلاغ من السجل.', 'error');
+      }
+      return;
+    }
+
+    const updatedEntries = removeMyReportEntry(reportId);
+    setMyReportEntries(updatedEntries);
+    setReports((prev) => prev.filter((item) => item.id !== reportId));
+    showToast('تم حذف البلاغ نهائياً من السجل.', 'info');
   };
 
   const handleLookupByCode = async (reportCode: string) => {
@@ -244,7 +319,9 @@ export default function App() {
 
     const found = response.data;
     setReports((prev) => {
-      if (prev.some((item) => item.id === found.id)) return prev;
+      if (prev.some((item) => item.id === found.id)) {
+        return prev.map((item) => (item.id === found.id ? found : item));
+      }
       return [found, ...prev];
     });
 
@@ -269,6 +346,10 @@ export default function App() {
   const handleMarkAsMatched = async (report: LostReport) => {
     const response = await apiService.markAsMatched(report.id);
     if (!response.success || !response.data) {
+      if (response.statusCode === 401) {
+        handleUnauthorizedSession(response.error || undefined);
+        return;
+      }
       showToast(
         response.error || 'تعذر تحديث حالة البلاغ إلى موجود بالمكتب.',
         'error'
@@ -291,6 +372,10 @@ export default function App() {
   const handleResendPickupReminder = async (report: LostReport) => {
     const response = await apiService.resendPickupReminder(report.id);
     if (!response.success || !response.data) {
+      if (response.statusCode === 401) {
+        handleUnauthorizedSession(response.error || undefined);
+        return;
+      }
       showToast(response.error || 'تعذر إرسال تذكير الاستلام.', 'error');
       return;
     }
@@ -310,6 +395,11 @@ export default function App() {
   const handleConfirmDelivery = async (reportId: string) => {
     const response = await apiService.confirmDelivery(reportId);
     if (!response.success || !response.data) {
+      if (response.statusCode === 401) {
+        setDeliveryReport(null);
+        handleUnauthorizedSession(response.error || undefined);
+        return;
+      }
       const msg =
         response.error || 'تعذر تأكيد التسليم النهائي، يرجى المحاولة مرة أخرى.';
       showToast(msg, 'error');
@@ -359,6 +449,10 @@ export default function App() {
   const handleNotifyNotFound = async (report: LostReport) => {
     const response = await apiService.notifyNotFoundYet(report.id);
     if (!response.success || !response.data) {
+      if (response.statusCode === 401) {
+        handleUnauthorizedSession(response.error || undefined);
+        return;
+      }
       showToast(response.error || 'تعذر تسجيل إشعار المراجعة.', 'error');
       return;
     }
@@ -378,18 +472,31 @@ export default function App() {
   const handleClearLocalData = async () => {
     if (isResetting) return;
     setIsResetting(true);
-    setIsLoading(true);
     const response = await apiService.clearAllReports();
-    if (response.success && response.data) {
-      setReports(response.data);
+    if (response.success) {
       setMyReportEntries([]);
       setStudentProfile(null);
-      showToast('تم مسح جميع البلاغات المحفوظة محلياً.', 'info');
+      if (!hasInMemoryStaffToken()) {
+        setReports([]);
+      }
+      showToast('تم مسح سجل هذا المتصفح المحلي بنجاح.', 'info');
     } else {
       showToast(response.error || 'تعذر مسح البيانات المحلية.', 'error');
     }
-    setIsLoading(false);
     setIsResetting(false);
+  };
+
+  const handleStaffLoginSuccess = (faculty: UniversityFaculty) => {
+    setStaffFaculty(faculty);
+    showToast(`تم الدخول إلى مكتب شؤون الطلاب — ${faculty}.`, 'success');
+    void fetchReports({ silent: true });
+  };
+
+  const handleStaffLogout = async () => {
+    await apiService.staffLogout();
+    setStaffFaculty(null);
+    showToast('تم تسجيل الخروج من بوابة المكتب.', 'info');
+    void fetchReports({ silent: true });
   };
 
   return (
@@ -488,8 +595,12 @@ export default function App() {
               <MyReportsView
                 myReports={myReports}
                 isLoading={isLoading}
+                isRefreshing={isRefreshing}
+                onRefresh={() => void fetchReports({ silent: true })}
                 onLookupByCode={handleLookupByCode}
+                onUpdateReport={handleUpdateReport}
                 onCancelReport={handleCancelReport}
+                onDeleteReport={handleDeleteReport}
                 onMarkNotificationRead={handleMarkNotificationRead}
                 onRemoveFromMyList={handleRemoveFromMyList}
                 onGoToReportForm={() => setStudentTab('report')}
@@ -501,20 +612,15 @@ export default function App() {
           <StaffPortalView
             reports={reports}
             staffFaculty={staffFaculty}
-            onLogin={(faculty) => {
-              setStaffFaculty(faculty);
-              showToast(`تم الدخول إلى مكتب شؤون الطلاب — ${faculty}.`, 'success');
-            }}
-            onLogout={() => {
-              setStaffFaculty(null);
-              showToast('تم تسجيل الخروج من بوابة المكتب.', 'info');
-            }}
+            isRefreshing={isRefreshing}
+            onRefresh={() => void fetchReports({ silent: true })}
+            onLogin={handleStaffLoginSuccess}
+            onLogout={() => void handleStaffLogout()}
             onMarkAsMatched={handleMarkAsMatched}
             onNotifyNotFound={handleNotifyNotFound}
             onResendPickupReminder={handleResendPickupReminder}
             onOpenDeliveryModal={(report) => setDeliveryReport(report)}
             onLoginError={(msg) => showToast(msg, 'error')}
-            onCopyFeedback={(msg) => showToast(msg, 'info')}
           />
         )}
       </main>
