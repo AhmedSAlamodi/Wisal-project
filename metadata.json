@@ -1,0 +1,6 @@
+{
+  "name": "وصال الجامعي",
+  "description": "منصة جامعية ذكية لإدارة واستعادة المفقودات داخل كليات الجامعة بسرعة وموثوقية.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
