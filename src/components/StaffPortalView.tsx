@@ -25,7 +25,6 @@ import {
   detectUrgentItem,
   formatPhoneForDisplay,
   isUsingLocalFallback,
-  LOCAL_FALLBACK_DEMO_PASSCODE,
   normalizeArabicText,
 } from '../services/apiService';
 import {
@@ -114,6 +113,9 @@ export function StaffPortalView({
   );
   const [isCheckingStatus, setIsCheckingStatus] = useState(true);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
+  const [confirmingLocalReset, setConfirmingLocalReset] = useState(false);
+  const [isResettingLocalPasscode, setIsResettingLocalPasscode] =
+    useState(false);
 
   const [activeTab, setActiveTab] = useState<LostReportStatus>('pending');
   const [searchQuery, setSearchQuery] = useState('');
@@ -129,6 +131,7 @@ export function StaffPortalView({
     setLoginError(null);
     setPasscode('');
     setConfirmPasscode('');
+    setConfirmingLocalReset(false);
 
     apiService.getStaffAuthStatus(selectedFaculty).then((res) => {
       if (cancelled) return;
@@ -276,7 +279,9 @@ export function StaffPortalView({
     if (!res.success || !res.data) {
       if (isUsingLocalFallback()) {
         setIsLocalFallback(true);
-        setNeedsSetup(false);
+        if (res.statusCode === 409) {
+          setNeedsSetup(true);
+        }
       }
       const msg =
         res.error ||
@@ -289,10 +294,34 @@ export function StaffPortalView({
     setPasscode('');
     setConfirmPasscode('');
     setShowPasscode(false);
+    setConfirmingLocalReset(false);
     setIsLocalFallback(
       Boolean(res.data.localFallback) || isUsingLocalFallback()
     );
     onLogin(selectedFaculty);
+  };
+
+  const handleResetLocalPasscode = async () => {
+    if (isResettingLocalPasscode || isAuthenticating) return;
+    setIsResettingLocalPasscode(true);
+    setLoginError(null);
+
+    const res = await apiService.resetLocalStaffPasscode(selectedFaculty);
+    setIsResettingLocalPasscode(false);
+
+    if (!res.success) {
+      const msg = res.error || 'تعذر إعادة تعيين الرمز المحلي.';
+      setLoginError(msg);
+      onLoginError(msg);
+      return;
+    }
+
+    setPasscode('');
+    setConfirmPasscode('');
+    setShowPasscode(false);
+    setConfirmingLocalReset(false);
+    setNeedsSetup(true);
+    setIsLocalFallback(true);
   };
 
   if (!staffFaculty) {
@@ -352,23 +381,29 @@ export function StaffPortalView({
 
             {needsSetup && !isCheckingStatus && (
               <div className="p-3 rounded-lg bg-[#F5F7FA] border border-[#E2E8F0] text-xs text-slate-700 leading-relaxed">
-                لم يتم تعيين رمز دخول أمني لـ{' '}
-                <strong className="text-[#0F2942]">{selectedFaculty}</strong>{' '}
-                بعد. أنشئ رمزاً خاصاً بالكلية الآن (6 أحرف على الأقل) لتأمين
-                البوابة.
+                {isLocalFallback ? (
+                  <>
+                    الوضع المحلي (بدون خادم خلفي): لم يتم تعيين رمز دخول محفوظ
+                    لـ <strong className="text-[#0F2942]">{selectedFaculty}</strong>{' '}
+                    في هذا المتصفح بعد. أنشئ رمزاً خاصاً بالكلية الآن (6 أحرف
+                    على الأقل) لحفظه والدخول مباشرة.
+                  </>
+                ) : (
+                  <>
+                    لم يتم تعيين رمز دخول أمني لـ{' '}
+                    <strong className="text-[#0F2942]">{selectedFaculty}</strong>{' '}
+                    بعد. أنشئ رمزاً خاصاً بالكلية الآن (6 أحرف على الأقل) لتأمين
+                    البوابة.
+                  </>
+                )}
               </div>
             )}
 
             {isLocalFallback && !isCheckingStatus && !needsSetup && (
               <div className="p-3 rounded-lg bg-[#F5F7FA] border border-[#E2E8F0] text-xs text-slate-700 leading-relaxed">
-                وضع العرض المحلي الاحتياطي (بدون خادم خلفي): تُحفظ البلاغات
-                والتحديثات في هذا المتصفح. الرمز الافتراضي للتجربة:{' '}
-                <strong
-                  dir="ltr"
-                  className="font-mono font-bold text-[#0F2942]"
-                >
-                  {LOCAL_FALLBACK_DEMO_PASSCODE}
-                </strong>
+                الوضع المحلي (بدون خادم خلفي): أدخل الرمز المحفوظ في هذا
+                المتصفح لـ{' '}
+                <strong className="text-[#0F2942]">{selectedFaculty}</strong>.
               </div>
             )}
 
@@ -463,6 +498,64 @@ export function StaffPortalView({
                   : 'دخول إلى لوحة المكتب'}
               </span>
             </button>
+
+            {isLocalFallback && !isCheckingStatus && !needsSetup && (
+              <div className="pt-2 border-t border-[#E2E8F0]">
+                {!confirmingLocalReset ? (
+                  <div className="flex items-center justify-between gap-2 text-xs">
+                    <span className="text-slate-500">
+                      هل نسيت الرمز المحفوظ لهذه الكلية؟
+                    </span>
+                    <button
+                      type="button"
+                      disabled={isAuthenticating || isResettingLocalPasscode}
+                      onClick={() => {
+                        setConfirmingLocalReset(true);
+                        setLoginError(null);
+                      }}
+                      className="text-xs font-semibold text-[#0F2942] hover:underline disabled:opacity-60 cursor-pointer py-1 px-1"
+                    >
+                      إعادة تعيين الرمز المحلي
+                    </button>
+                  </div>
+                ) : (
+                  <div className="p-3 rounded-lg bg-[#F5F7FA] border border-[#E2E8F0] space-y-2.5">
+                    <p className="text-xs text-slate-700 leading-relaxed">
+                      سيتم حذف الرمز المحلي المحفوظ لـ{' '}
+                      <strong className="text-[#0F2942]">
+                        {selectedFaculty}
+                      </strong>{' '}
+                      لتتمكن من تعيين رمز جديد.
+                    </p>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        disabled={isResettingLocalPasscode}
+                        onClick={() => void handleResetLocalPasscode()}
+                        className="inline-flex items-center justify-center gap-1.5 px-3 py-2 min-h-[38px] rounded-lg bg-[#0F2942] hover:bg-[#163859] disabled:opacity-70 text-white text-xs font-semibold transition-all active:scale-[0.99] cursor-pointer"
+                      >
+                        {isResettingLocalPasscode && (
+                          <Loader2
+                            className="w-3.5 h-3.5 animate-spin shrink-0"
+                            strokeWidth={1.6}
+                            aria-hidden="true"
+                          />
+                        )}
+                        <span>تأكيد إعادة التعيين</span>
+                      </button>
+                      <button
+                        type="button"
+                        disabled={isResettingLocalPasscode}
+                        onClick={() => setConfirmingLocalReset(false)}
+                        className="inline-flex items-center justify-center px-3 py-2 min-h-[38px] rounded-lg bg-white hover:bg-slate-100 border border-[#E2E8F0] text-slate-700 text-xs font-semibold transition-all active:scale-[0.99] cursor-pointer"
+                      >
+                        إلغاء
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </form>
         </section>
       </div>
