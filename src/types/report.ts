@@ -116,12 +116,14 @@ export interface StudentProfile {
 export interface StaffAuthStatus {
   faculty: UniversityFaculty;
   needsSetup: boolean;
+  localFallback?: boolean;
 }
 
 export interface StaffSession {
   token: string;
   faculty: UniversityFaculty;
   expiresAt: string;
+  localFallback?: boolean;
 }
 
 export interface ApiResponse<T> {

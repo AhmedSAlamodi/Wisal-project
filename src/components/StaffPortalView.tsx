@@ -24,6 +24,8 @@ import {
   apiService,
   detectUrgentItem,
   formatPhoneForDisplay,
+  isUsingLocalFallback,
+  LOCAL_FALLBACK_DEMO_PASSCODE,
   normalizeArabicText,
 } from '../services/apiService';
 import {
@@ -107,6 +109,9 @@ export function StaffPortalView({
   const [showPasscode, setShowPasscode] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
   const [needsSetup, setNeedsSetup] = useState(false);
+  const [isLocalFallback, setIsLocalFallback] = useState<boolean>(() =>
+    isUsingLocalFallback()
+  );
   const [isCheckingStatus, setIsCheckingStatus] = useState(true);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
 
@@ -129,8 +134,12 @@ export function StaffPortalView({
       if (cancelled) return;
       if (res.success && res.data) {
         setNeedsSetup(res.data.needsSetup);
+        setIsLocalFallback(
+          Boolean(res.data.localFallback) || isUsingLocalFallback()
+        );
       } else {
         setNeedsSetup(false);
+        setIsLocalFallback(isUsingLocalFallback());
         if (res.error) {
           setLoginError(res.error);
         }
@@ -253,6 +262,9 @@ export function StaffPortalView({
       setConfirmPasscode('');
       setShowPasscode(false);
       setNeedsSetup(false);
+      setIsLocalFallback(
+        Boolean(res.data.localFallback) || isUsingLocalFallback()
+      );
       onLogin(selectedFaculty);
       return;
     }
@@ -262,6 +274,10 @@ export function StaffPortalView({
     setIsAuthenticating(false);
 
     if (!res.success || !res.data) {
+      if (isUsingLocalFallback()) {
+        setIsLocalFallback(true);
+        setNeedsSetup(false);
+      }
       const msg =
         res.error ||
         `رمز الدخول الأمني غير صحيح لـ (${selectedFaculty}).`;
@@ -273,6 +289,9 @@ export function StaffPortalView({
     setPasscode('');
     setConfirmPasscode('');
     setShowPasscode(false);
+    setIsLocalFallback(
+      Boolean(res.data.localFallback) || isUsingLocalFallback()
+    );
     onLogin(selectedFaculty);
   };
 
@@ -337,6 +356,19 @@ export function StaffPortalView({
                 <strong className="text-[#0F2942]">{selectedFaculty}</strong>{' '}
                 بعد. أنشئ رمزاً خاصاً بالكلية الآن (6 أحرف على الأقل) لتأمين
                 البوابة.
+              </div>
+            )}
+
+            {isLocalFallback && !isCheckingStatus && !needsSetup && (
+              <div className="p-3 rounded-lg bg-[#F5F7FA] border border-[#E2E8F0] text-xs text-slate-700 leading-relaxed">
+                وضع العرض المحلي الاحتياطي (بدون خادم خلفي): تُحفظ البلاغات
+                والتحديثات في هذا المتصفح. الرمز الافتراضي للتجربة:{' '}
+                <strong
+                  dir="ltr"
+                  className="font-mono font-bold text-[#0F2942]"
+                >
+                  {LOCAL_FALLBACK_DEMO_PASSCODE}
+                </strong>
               </div>
             )}
 

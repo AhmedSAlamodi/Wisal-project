@@ -15,6 +15,7 @@ import {
   buildOfficialWhatsAppUrl,
   clearInMemoryStaffToken,
   hasInMemoryStaffToken,
+  isUsingLocalFallback,
   OFFICIAL_WHATSAPP_DISPLAY,
   readMyReportEntries,
   readStudentProfile,
@@ -476,7 +477,7 @@ export default function App() {
     if (response.success) {
       setMyReportEntries([]);
       setStudentProfile(null);
-      if (!hasInMemoryStaffToken()) {
+      if (!hasInMemoryStaffToken() || isUsingLocalFallback()) {
         setReports([]);
       }
       showToast('تم مسح سجل هذا المتصفح المحلي بنجاح.', 'info');
