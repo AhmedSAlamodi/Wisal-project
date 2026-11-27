@@ -20,7 +20,11 @@ import {
   savePushSubscriptionLocally,
   showServiceWorkerNotification,
 } from './pwaService';
-import { isSupabaseConfigured, supabase } from './supabaseClient';
+import {
+  getSupabaseConfigDiagnostic,
+  isSupabaseConfigured,
+  supabase,
+} from './supabaseClient';
 
 /**
  * إعدادات الاتصال بالخادم (API Configuration)
@@ -1358,7 +1362,14 @@ function isSupabaseConnectionFailure(
 ): boolean {
   if (error instanceof SupabaseConnectionError) return true;
   if (typeof httpStatus === 'number') {
-    if (httpStatus === 0 || httpStatus >= 500 || httpStatus === 401 || httpStatus === 403 || httpStatus === 404) {
+    if (
+      httpStatus === 0 ||
+      httpStatus >= 500 ||
+      httpStatus === 400 ||
+      httpStatus === 401 ||
+      httpStatus === 403 ||
+      httpStatus === 404
+    ) {
       return true;
     }
   }
@@ -1369,11 +1380,14 @@ function isSupabaseConnectionFailure(
     if (
       code === '42P01' ||
       code === '42703' ||
+      code === '23502' ||
+      code === '22P02' ||
       code === 'PGRST204' ||
       code === 'PGRST205' ||
       code === 'PGRST301' ||
       code === 'PGRST000' ||
-      code === '42501'
+      code === '42501' ||
+      code.startsWith('PGRST')
     ) {
       return true;
     }
@@ -1558,6 +1572,41 @@ function mapSupabaseRowToReport(raw: unknown): LostReport | null {
   };
 }
 
+function formatSupabaseError(
+  error: unknown,
+  status: number,
+  fallbackMessage: string
+): string {
+  if (!error || typeof error !== 'object') {
+    return status ? `[HTTP ${status}] ${fallbackMessage}` : fallbackMessage;
+  }
+  const errObj = error as {
+    code?: unknown;
+    message?: unknown;
+    details?: unknown;
+    hint?: unknown;
+  };
+  const parts: string[] = [];
+  if (typeof status === 'number' && status > 0) parts.push(`HTTP ${status}`);
+  if (typeof errObj.code === 'string' && errObj.code.trim()) {
+    parts.push(errObj.code.trim());
+  }
+  const prefix = parts.length > 0 ? `[${parts.join(' / ')}] ` : '';
+  const msg =
+    typeof errObj.message === 'string' && errObj.message.trim()
+      ? errObj.message.trim()
+      : fallbackMessage;
+  const details =
+    typeof errObj.details === 'string' && errObj.details.trim()
+      ? ` (${errObj.details.trim()})`
+      : '';
+  const hint =
+    typeof errObj.hint === 'string' && errObj.hint.trim()
+      ? ` — ${errObj.hint.trim()}`
+      : '';
+  return `${prefix}${msg}${details}${hint}`;
+}
+
 function assertSupabaseOk<T>(
   data: T,
   error: unknown,
@@ -1565,17 +1614,11 @@ function assertSupabaseOk<T>(
   fallbackMessage: string
 ): T {
   if (error) {
+    const formatted = formatSupabaseError(error, status, fallbackMessage);
     if (isSupabaseConnectionFailure(error, status)) {
-      throw new SupabaseConnectionError(
-        (error as { message?: string })?.message || fallbackMessage
-      );
+      throw new SupabaseConnectionError(formatted);
     }
-    const msg =
-      typeof (error as { message?: string })?.message === 'string' &&
-      (error as { message: string }).message.trim()
-        ? (error as { message: string }).message
-        : fallbackMessage;
-    throw new Error(msg);
+    throw new Error(formatted);
   }
   return data;
 }
@@ -1585,27 +1628,42 @@ async function executeSupabaseWithFallback<T>(
   localHandler: () => ApiResponse<T> | Promise<ApiResponse<T>>
 ): Promise<ApiResponse<T>> {
   if (!isSupabaseConfigured() || !supabase) {
-    return await localHandler();
+    const localRes = await localHandler();
+    return {
+      ...localRes,
+      storageSource: 'localStorage',
+      supabaseError: getSupabaseConfigDiagnostic(),
+    };
   }
   try {
-    return await supabaseCall();
+    const res = await supabaseCall();
+    return {
+      ...res,
+      storageSource: 'supabase',
+      supabaseError: null,
+    };
   } catch (err) {
+    const errMessage = err instanceof Error && err.message ? err.message : String(err);
     if (isSupabaseConnectionFailure(err)) {
       console.warn(
-        '[Wisal Supabase] Request failed; falling back to localStorage.',
-        err instanceof Error ? err.message : err
+        '[Wisal Supabase] Request failed; falling back to localStorage:',
+        errMessage
       );
-      return await localHandler();
+      const localRes = await localHandler();
+      return {
+        ...localRes,
+        storageSource: 'localStorage',
+        supabaseError: errMessage,
+      };
     }
     console.error('[Wisal Supabase] Unexpected operation error:', err);
     return {
       success: false,
       data: null,
-      error:
-        err instanceof Error && err.message
-          ? err.message
-          : 'تعذر إتمام العملية، يرجى المحاولة مجدداً.',
+      error: errMessage || 'تعذر إتمام العملية، يرجى المحاولة مجدداً.',
       statusCode: 500,
+      storageSource: 'supabase',
+      supabaseError: errMessage,
     };
   }
 }
@@ -2799,22 +2857,45 @@ export const apiService = {
           () => supabaseCreateReport(payload, cleanPhone, pushSubscription),
           () => localCreateReport(payload, cleanPhone, pushSubscription)
         )
-      : await executeWithFallback<LostReport>(
-          () =>
-            fetch(API_BASE_URL, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                ...payload,
-                phoneNumber: cleanPhone,
-                pushSubscription,
+      : await (async (): Promise<ApiResponse<LostReport>> => {
+          let fellBackToLocal = false;
+          const apiRes = await executeWithFallback<LostReport>(
+            () =>
+              fetch(API_BASE_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  ...payload,
+                  phoneNumber: cleanPhone,
+                  pushSubscription,
+                }),
               }),
-            }),
-          'تعذر حفظ البلاغ على الخادم.',
-          () => localCreateReport(payload, cleanPhone, pushSubscription)
-        );
+            'تعذر حفظ البلاغ على الخادم.',
+            () => {
+              fellBackToLocal = true;
+              return localCreateReport(payload, cleanPhone, pushSubscription);
+            }
+          );
+          return {
+            ...apiRes,
+            storageSource: fellBackToLocal ? 'localStorage' : 'api',
+            supabaseError: fellBackToLocal ? getSupabaseConfigDiagnostic() : null,
+          };
+        })();
 
     if (result.success && result.data) {
+      if (result.storageSource === 'supabase') {
+        console.info('[Wisal Submit] Report saved to Supabase:', {
+          id: result.data.id,
+          reportCode: result.data.reportCode,
+        });
+      } else if (result.storageSource === 'localStorage') {
+        console.warn('[Wisal Submit] Report saved to localStorage fallback:', {
+          id: result.data.id,
+          reportCode: result.data.reportCode,
+          supabaseError: result.supabaseError ?? 'Supabase unavailable',
+        });
+      }
       saveStudentProfile({
         studentFaculty: result.data.faculty,
         studentName: result.data.studentName,

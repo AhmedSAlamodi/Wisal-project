@@ -129,9 +129,10 @@ export default function App() {
 
   useEffect(() => {
     if (!toast) return;
+    const duration = toast.message.includes('localStorage') ? 7500 : 4500;
     const timer = window.setTimeout(() => {
       setToast(null);
-    }, 4500);
+    }, duration);
     return () => window.clearTimeout(timer);
   }, [toast]);
 
@@ -307,10 +308,25 @@ export default function App() {
     setMyReportEntries(updatedEntries);
     setStudentProfile(readStudentProfile());
 
-    showToast(
-      `تم تسجيل البلاغ ${created.reportCode} وحفظه تلقائياً في «بلاغاتي».`,
-      'success'
-    );
+    if (response.storageSource === 'supabase') {
+      showToast(
+        `تم تسجيل البلاغ ${created.reportCode} وحفظه في Supabase بنجاح.`,
+        'success'
+      );
+    } else if (response.storageSource === 'localStorage') {
+      const reason = response.supabaseError
+        ? ` — خطأ Supabase: ${response.supabaseError}`
+        : '';
+      showToast(
+        `تم حفظ البلاغ ${created.reportCode} محلياً (localStorage)${reason}`,
+        'info'
+      );
+    } else {
+      showToast(
+        `تم تسجيل البلاغ ${created.reportCode} وحفظه تلقائياً في «بلاغاتي».`,
+        'success'
+      );
+    }
     return created;
   };
 

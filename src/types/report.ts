@@ -131,4 +131,6 @@ export interface ApiResponse<T> {
   data: T | null;
   error: string | null;
   statusCode?: number;
+  storageSource?: 'supabase' | 'localStorage' | 'api';
+  supabaseError?: string | null;
 }
