@@ -3,10 +3,12 @@ import {
   UNIVERSITY_FACULTIES,
   type ApiResponse,
   type CreateLostReportPayload,
+  type LocationType,
   type LostReport,
   type LostReportStatus,
   type MyReportEntry,
   type PushSubscriptionPayload,
+  type ReportNotification,
   type StaffAuthStatus,
   type StaffSession,
   type StudentProfile,
@@ -18,6 +20,7 @@ import {
   savePushSubscriptionLocally,
   showServiceWorkerNotification,
 } from './pwaService';
+import { isSupabaseConfigured, supabase } from './supabaseClient';
 
 /**
  * إعدادات الاتصال بالخادم (API Configuration)
@@ -32,9 +35,22 @@ export const STAFF_API_BASE_URL = '/api/staff';
 export const OFFICIAL_WHATSAPP_NUMBER = '967734918671';
 export const OFFICIAL_WHATSAPP_DISPLAY = '734918671';
 
+export const DEMO_FACULTY_PASSCODES: Record<UniversityFaculty, string> = {
+  'كلية الطب والعلوم الصحية': '1001',
+  'كلية الهندسة والبترول': '1002',
+  'كلية الحاسبات وتقنية المعلومات': '1003',
+  'كلية العلوم': '1004',
+  'كلية العلوم الإدارية': '1005',
+  'كلية العلوم البيئية والأحياء البحرية': '1006',
+  'كلية التمريض': '1007',
+  'كلية الآداب': '1008',
+  'كلية القانون': '1009',
+  'كلية البنات': '1010',
+  'كلية التربية – المكلا': '1011',
+};
+
 const OFFLINE_CACHE_KEY = 'wisal_student_affairs_reports_v6';
 const LOCAL_SEQUENCE_KEY = 'wisal_local_sequence_v1';
-const LOCAL_STAFF_PASSCODES_KEY = 'wisal_local_staff_passcodes_v1';
 const LEGACY_STORAGE_KEYS = [
   'wisal_student_affairs_reports_v1',
   'wisal_student_affairs_reports_v2',
@@ -652,101 +668,6 @@ function createLocalToken(prefix: string): string {
 // طبقة التشغيل الاحتياطي المحلي (localStorage)
 // ==========================================
 
-interface LocalStaffPasscodeRecord {
-  salt: string;
-  hash: string;
-  createdAt: string;
-}
-
-function sha256FallbackHex(input: string): string {
-  const bytes = new TextEncoder().encode(input);
-  const k = new Uint32Array([
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
-    0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
-    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
-    0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
-    0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
-    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-    0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
-    0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
-    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
-  ]);
-  const h = new Uint32Array([
-    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c,
-    0x1f83d9ab, 0x5be0cd19,
-  ]);
-
-  const bitLen = bytes.length * 8;
-  const paddedLen = Math.ceil((bytes.length + 9) / 64) * 64;
-  const padded = new Uint8Array(paddedLen);
-  padded.set(bytes);
-  padded[bytes.length] = 0x80;
-  const view = new DataView(padded.buffer);
-  view.setUint32(paddedLen - 8, Math.floor(bitLen / 0x100000000), false);
-  view.setUint32(paddedLen - 4, bitLen >>> 0, false);
-
-  const w = new Uint32Array(64);
-  const rotr = (x: number, n: number) => (x >>> n) | (x << (32 - n));
-
-  for (let offset = 0; offset < paddedLen; offset += 64) {
-    for (let i = 0; i < 16; i += 1) {
-      w[i] = view.getUint32(offset + i * 4, false);
-    }
-    for (let i = 16; i < 64; i += 1) {
-      const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3);
-      const s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10);
-      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
-    }
-
-    let [a, b, c, d, e, f, g, hh] = h;
-    for (let i = 0; i < 64; i += 1) {
-      const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
-      const ch = (e & f) ^ (~e & g);
-      const temp1 = (hh + S1 + ch + k[i] + w[i]) >>> 0;
-      const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
-      const maj = (a & b) ^ (a & c) ^ (b & c);
-      const temp2 = (S0 + maj) >>> 0;
-      hh = g;
-      g = f;
-      f = e;
-      e = (d + temp1) >>> 0;
-      d = c;
-      c = b;
-      b = a;
-      a = (temp1 + temp2) >>> 0;
-    }
-
-    h[0] = (h[0] + a) >>> 0;
-    h[1] = (h[1] + b) >>> 0;
-    h[2] = (h[2] + c) >>> 0;
-    h[3] = (h[3] + d) >>> 0;
-    h[4] = (h[4] + e) >>> 0;
-    h[5] = (h[5] + f) >>> 0;
-    h[6] = (h[6] + g) >>> 0;
-    h[7] = (h[7] + hh) >>> 0;
-  }
-
-  return Array.from(h, (word) => word.toString(16).padStart(8, '0')).join('');
-}
-
-async function hashLocalPasscode(passcode: string, salt: string): Promise<string> {
-  const material = `${salt}:${passcode}`;
-  try {
-    if (typeof crypto !== 'undefined' && crypto.subtle) {
-      const encoded = new TextEncoder().encode(material);
-      const digest = await crypto.subtle.digest('SHA-256', encoded);
-      return Array.from(new Uint8Array(digest), (b) =>
-        b.toString(16).padStart(2, '0')
-      ).join('');
-    }
-  } catch {
-    // استخدام التنفيذ البديل عند تعذر crypto.subtle
-  }
-  return sha256FallbackHex(material);
-}
-
 function constantTimeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
   let diff = 0;
@@ -754,53 +675,6 @@ function constantTimeEqual(a: string, b: string): boolean {
     diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
   }
   return diff === 0;
-}
-
-function readLocalStaffPasscodes(): Record<string, LocalStaffPasscodeRecord> {
-  try {
-    const raw = localStorage.getItem(LOCAL_STAFF_PASSCODES_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return {};
-    }
-    const validFaculties = new Set<string>(UNIVERSITY_FACULTIES);
-    const cleaned: Record<string, LocalStaffPasscodeRecord> = {};
-    for (const [faculty, entry] of Object.entries(
-      parsed as Record<string, Partial<LocalStaffPasscodeRecord>>
-    )) {
-      if (
-        validFaculties.has(faculty) &&
-        entry &&
-        typeof entry.salt === 'string' &&
-        entry.salt &&
-        typeof entry.hash === 'string' &&
-        entry.hash
-      ) {
-        cleaned[faculty] = {
-          salt: entry.salt,
-          hash: entry.hash,
-          createdAt:
-            typeof entry.createdAt === 'string'
-              ? entry.createdAt
-              : new Date().toISOString(),
-        };
-      }
-    }
-    return cleaned;
-  } catch {
-    return {};
-  }
-}
-
-function writeLocalStaffPasscodes(
-  records: Record<string, LocalStaffPasscodeRecord>
-): void {
-  try {
-    localStorage.setItem(LOCAL_STAFF_PASSCODES_KEY, JSON.stringify(records));
-  } catch {
-    // تجاهل في حال تعذر التخزين
-  }
 }
 
 function localGetStaffAuthStatus(
@@ -814,12 +688,11 @@ function localGetStaffAuthStatus(
       statusCode: 400,
     };
   }
-  const records = readLocalStaffPasscodes();
   return {
     success: true,
     data: {
       faculty,
-      needsSetup: !records[faculty],
+      needsSetup: false,
       localFallback: true,
     },
     error: null,
@@ -827,67 +700,10 @@ function localGetStaffAuthStatus(
   };
 }
 
-async function localSetupStaffPasscode(
+function localStaffLogin(
   faculty: UniversityFaculty,
   passcode: string
-): Promise<ApiResponse<StaffSession>> {
-  if (!UNIVERSITY_FACULTIES.includes(faculty)) {
-    return {
-      success: false,
-      data: null,
-      error: 'الكلية المحددة غير صالحة.',
-      statusCode: 400,
-    };
-  }
-  const trimmed = passcode.trim();
-  if (trimmed.length < 6 || trimmed.length > 128) {
-    return {
-      success: false,
-      data: null,
-      error: 'يجب أن يتكون رمز الكلية من 6 أحرف على الأقل (وبحد أقصى 128 حرفاً).',
-      statusCode: 400,
-    };
-  }
-
-  const records = readLocalStaffPasscodes();
-  if (records[faculty]) {
-    return {
-      success: false,
-      data: null,
-      error: `تم تعيين رمز دخول محلي لـ (${faculty}) مسبقاً.`,
-      statusCode: 409,
-    };
-  }
-
-  const salt = createLocalToken('salt');
-  const hash = await hashLocalPasscode(trimmed, salt);
-  records[faculty] = {
-    salt,
-    hash,
-    createdAt: new Date().toISOString(),
-  };
-  writeLocalStaffPasscodes(records);
-
-  inMemoryStaffToken = null;
-  inMemoryLocalStaffFaculty = faculty;
-  const expiresAt = new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString();
-  return {
-    success: true,
-    data: {
-      token: '',
-      faculty,
-      expiresAt,
-      localFallback: true,
-    },
-    error: null,
-    statusCode: 201,
-  };
-}
-
-async function localStaffLogin(
-  faculty: UniversityFaculty,
-  passcode: string
-): Promise<ApiResponse<StaffSession>> {
+): ApiResponse<StaffSession> {
   if (!UNIVERSITY_FACULTIES.includes(faculty)) {
     return {
       success: false,
@@ -906,19 +722,8 @@ async function localStaffLogin(
     };
   }
 
-  const records = readLocalStaffPasscodes();
-  const record = records[faculty];
-  if (!record) {
-    return {
-      success: false,
-      data: null,
-      error: `لم يتم تعيين رمز دخول محلي لـ (${faculty}) بعد. يرجى تعيين رمز للكلية أولاً.`,
-      statusCode: 409,
-    };
-  }
-
-  const candidateHash = await hashLocalPasscode(trimmed, record.salt);
-  if (!constantTimeEqual(candidateHash, record.hash)) {
+  const expectedCode = DEMO_FACULTY_PASSCODES[faculty];
+  if (!expectedCode || !constantTimeEqual(trimmed, expectedCode)) {
     return {
       success: false,
       data: null,
@@ -989,7 +794,7 @@ function localGetReportByCode(rawCode: string): ApiResponse<LostReport> {
     return {
       success: false,
       data: null,
-      error: `لا يوجد بلاغ مسجل برقم (${normalizedCode}) في التخزين المحلي.`,
+      error: `لم يتم العثور على بلاغ بهذا الرقم (${normalizedCode}).`,
       statusCode: 404,
     };
   }
@@ -1526,13 +1331,1192 @@ function localDeleteReport(
   };
 }
 
+// ==========================================
+// طبقة مزامنة Supabase (snake_case <-> camelCase)
+// ==========================================
+
+const SUPABASE_REPORTS_TABLE = 'reports';
+const VALID_FACULTIES_SET = new Set<string>(UNIVERSITY_FACULTIES);
+const VALID_LOCATION_TYPES_SET = new Set<string>(LOCATION_TYPES);
+const VALID_STATUSES_SET = new Set<string>([
+  'pending',
+  'matched',
+  'delivered',
+  'cancelled',
+]);
+
+class SupabaseConnectionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SupabaseConnectionError';
+  }
+}
+
+function isSupabaseConnectionFailure(
+  error: unknown,
+  httpStatus?: number
+): boolean {
+  if (error instanceof SupabaseConnectionError) return true;
+  if (typeof httpStatus === 'number') {
+    if (httpStatus === 0 || httpStatus >= 500 || httpStatus === 401 || httpStatus === 403 || httpStatus === 404) {
+      return true;
+    }
+  }
+  if (error && typeof error === 'object') {
+    const errObj = error as { code?: string; message?: string };
+    const code = String(errObj.code || '');
+    const msg = String(errObj.message || '').toLowerCase();
+    if (
+      code === '42P01' ||
+      code === 'PGRST205' ||
+      code === 'PGRST301' ||
+      code === 'PGRST000' ||
+      code === '42501'
+    ) {
+      return true;
+    }
+    if (
+      msg.includes('failed to fetch') ||
+      msg.includes('network') ||
+      msg.includes('fetch') ||
+      msg.includes('connect') ||
+      msg.includes('timeout') ||
+      msg.includes('relation') ||
+      msg.includes('schema cache')
+    ) {
+      return true;
+    }
+  }
+  return error instanceof TypeError;
+}
+
+function createUuid(): string {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+    if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+      const bytes = new Uint8Array(16);
+      crypto.getRandomValues(bytes);
+      bytes[6] = (bytes[6] & 0x0f) | 0x40;
+      bytes[8] = (bytes[8] & 0x3f) | 0x80;
+      const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+      return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+    }
+  } catch {
+    // متابعة بالبديل
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+function parseNotificationField(raw: unknown): ReportNotification | undefined {
+  if (!raw) return undefined;
+  let obj: unknown = raw;
+  if (typeof raw === 'string') {
+    try {
+      obj = JSON.parse(raw);
+    } catch {
+      return undefined;
+    }
+  }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return undefined;
+  const n = obj as Record<string, unknown>;
+  if (typeof n.message !== 'string' || typeof n.createdAt !== 'string') {
+    return undefined;
+  }
+  return {
+    type: n.type === 'matched' || n.type === 'not_found' ? n.type : undefined,
+    message: n.message,
+    createdAt: n.createdAt,
+    unread: Boolean(n.unread),
+    ...(typeof n.readAt === 'string' ? { readAt: n.readAt } : {}),
+  };
+}
+
+function mapSupabaseRowToReport(raw: unknown): LostReport | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const row = raw as Record<string, unknown>;
+  const id = typeof row.id === 'string' ? row.id : row.id !== undefined && row.id !== null ? String(row.id) : '';
+  const reportCode =
+    typeof row.report_code === 'string'
+      ? row.report_code
+      : typeof row.reportCode === 'string'
+      ? row.reportCode
+      : '';
+  const studentName =
+    typeof row.student_name === 'string'
+      ? row.student_name
+      : typeof row.studentName === 'string'
+      ? row.studentName
+      : '';
+  const itemName =
+    typeof row.item_name === 'string'
+      ? row.item_name
+      : typeof row.itemName === 'string'
+      ? row.itemName
+      : '';
+  const description = typeof row.description === 'string' ? row.description : '';
+  const facultyRaw = typeof row.faculty === 'string' ? row.faculty : '';
+  const locationTypeRaw =
+    typeof row.location_type === 'string'
+      ? row.location_type
+      : typeof row.locationType === 'string'
+      ? row.locationType
+      : '';
+  const roomOrLocation =
+    typeof row.room_or_location === 'string'
+      ? row.room_or_location
+      : typeof row.roomOrLocation === 'string'
+      ? row.roomOrLocation
+      : '';
+  const timePeriod =
+    typeof row.time_period === 'string'
+      ? row.time_period
+      : typeof row.timePeriod === 'string'
+      ? row.timePeriod
+      : '';
+  const phoneNumber =
+    typeof row.phone_number === 'string'
+      ? row.phone_number
+      : typeof row.phoneNumber === 'string'
+      ? row.phoneNumber
+      : '';
+  const statusRaw = typeof row.status === 'string' ? row.status : 'pending';
+  const createdAt =
+    typeof row.created_at === 'string'
+      ? row.created_at
+      : typeof row.createdAt === 'string'
+      ? row.createdAt
+      : new Date().toISOString();
+
+  if (!id || !reportCode || !itemName || !VALID_FACULTIES_SET.has(facultyRaw)) {
+    return null;
+  }
+
+  const locationType: LocationType = VALID_LOCATION_TYPES_SET.has(locationTypeRaw)
+    ? (locationTypeRaw as LocationType)
+    : LOCATION_TYPES[0];
+  const status: LostReportStatus = VALID_STATUSES_SET.has(statusRaw)
+    ? (statusRaw as LostReportStatus)
+    : 'pending';
+
+  const matchedAt =
+    typeof row.matched_at === 'string'
+      ? row.matched_at
+      : typeof row.matchedAt === 'string'
+      ? row.matchedAt
+      : undefined;
+  const deliveredAt =
+    typeof row.delivered_at === 'string'
+      ? row.delivered_at
+      : typeof row.deliveredAt === 'string'
+      ? row.deliveredAt
+      : undefined;
+  const cancelledAt =
+    typeof row.cancelled_at === 'string'
+      ? row.cancelled_at
+      : typeof row.cancelledAt === 'string'
+      ? row.cancelledAt
+      : undefined;
+  const lastCheckedAt =
+    typeof row.last_checked_at === 'string'
+      ? row.last_checked_at
+      : typeof row.lastCheckedAt === 'string'
+      ? row.lastCheckedAt
+      : undefined;
+
+  const isUrgentRaw = row.is_urgent ?? row.isUrgent;
+  const notFoundRaw = row.not_found_notified ?? row.notFoundNotified;
+  const notification = parseNotificationField(row.notification);
+
+  return {
+    id,
+    reportCode,
+    studentName,
+    itemName,
+    description,
+    faculty: facultyRaw as UniversityFaculty,
+    locationType,
+    roomOrLocation,
+    timePeriod,
+    phoneNumber,
+    isUrgent: Boolean(isUrgentRaw) || detectUrgentItem(itemName),
+    status,
+    createdAt,
+    ...(matchedAt ? { matchedAt } : {}),
+    ...(deliveredAt ? { deliveredAt } : {}),
+    ...(cancelledAt ? { cancelledAt } : {}),
+    ...(notFoundRaw ? { notFoundNotified: true } : {}),
+    ...(lastCheckedAt ? { lastCheckedAt } : {}),
+    ...(notification ? { notification } : {}),
+  };
+}
+
+function assertSupabaseOk<T>(
+  data: T,
+  error: unknown,
+  status: number,
+  fallbackMessage: string
+): T {
+  if (error) {
+    if (isSupabaseConnectionFailure(error, status)) {
+      throw new SupabaseConnectionError(
+        (error as { message?: string })?.message || fallbackMessage
+      );
+    }
+    const msg =
+      typeof (error as { message?: string })?.message === 'string' &&
+      (error as { message: string }).message.trim()
+        ? (error as { message: string }).message
+        : fallbackMessage;
+    throw new Error(msg);
+  }
+  return data;
+}
+
+async function executeSupabaseWithFallback<T>(
+  supabaseCall: () => Promise<ApiResponse<T>>,
+  localHandler: () => ApiResponse<T> | Promise<ApiResponse<T>>
+): Promise<ApiResponse<T>> {
+  if (!isSupabaseConfigured() || !supabase) {
+    return await localHandler();
+  }
+  try {
+    return await supabaseCall();
+  } catch (err) {
+    if (isSupabaseConnectionFailure(err)) {
+      return await localHandler();
+    }
+    return {
+      success: false,
+      data: null,
+      error:
+        err instanceof Error && err.message
+          ? err.message
+          : 'تعذر إتمام العملية، يرجى المحاولة مجدداً.',
+      statusCode: 500,
+    };
+  }
+}
+
+async function supabaseGetReports(): Promise<ApiResponse<LostReport[]>> {
+  if (!supabase) throw new SupabaseConnectionError('Supabase unavailable');
+
+  if (inMemoryLocalStaffFaculty) {
+    const { data, error, status } = await supabase
+      .from(SUPABASE_REPORTS_TABLE)
+      .select('*')
+      .eq('faculty', inMemoryLocalStaffFaculty)
+      .order('created_at', { ascending: false });
+
+    const rows = assertSupabaseOk(
+      data,
+      error,
+      status,
+      'تعذر جلب البلاغات من قاعدة البيانات.'
+    );
+    const mapped = (rows || [])
+      .map(mapSupabaseRowToReport)
+      .filter((r): r is LostReport => r !== null);
+    return {
+      success: true,
+      data: sortReports(mapped),
+      error: null,
+      statusCode: 200,
+    };
+  }
+
+  const myIds = readMyReportEntries().map((e) => e.id);
+  if (myIds.length === 0) {
+    return {
+      success: true,
+      data: [],
+      error: null,
+      statusCode: 200,
+    };
+  }
+
+  const uuidPattern =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  let queryResult = await supabase
+    .from(SUPABASE_REPORTS_TABLE)
+    .select('*')
+    .in('id', myIds);
+
+  if (
+    queryResult.error &&
+    (queryResult.error as { code?: string }).code === '22P02'
+  ) {
+    const uuidIds = myIds.filter((id) => uuidPattern.test(id));
+    if (uuidIds.length === 0) {
+      return localGetReports();
+    }
+    queryResult = await supabase
+      .from(SUPABASE_REPORTS_TABLE)
+      .select('*')
+      .in('id', uuidIds);
+  }
+
+  const rows = assertSupabaseOk(
+    queryResult.data,
+    queryResult.error,
+    queryResult.status,
+    'تعذر جلب البلاغات من قاعدة البيانات.'
+  );
+  const mapped = (rows || [])
+    .map(mapSupabaseRowToReport)
+    .filter((r): r is LostReport => r !== null);
+
+  const existingLocal = readOfflineCache();
+  const remoteById = new Map(mapped.map((r) => [r.id, r]));
+  writeOfflineCache([
+    ...mapped,
+    ...existingLocal.filter((r) => !remoteById.has(r.id)),
+  ]);
+
+  const myIdSet = new Set(myIds);
+  const localOnlyOwned = existingLocal.filter(
+    (r) => myIdSet.has(r.id) && !remoteById.has(r.id) && r.id.startsWith('ws-')
+  );
+
+  return {
+    success: true,
+    data: sortReports([...mapped, ...localOnlyOwned]),
+    error: null,
+    statusCode: 200,
+  };
+}
+
+async function supabaseGetReportByCode(
+  normalizedCode: string
+): Promise<ApiResponse<LostReport>> {
+  if (!supabase) throw new SupabaseConnectionError('Supabase unavailable');
+  if (!normalizedCode || normalizedCode.length > 32) {
+    return {
+      success: false,
+      data: null,
+      error: 'يرجى كتابة رقم بلاغ صالح مثل WS-101.',
+      statusCode: 400,
+    };
+  }
+
+  const { data, error, status } = await supabase
+    .from(SUPABASE_REPORTS_TABLE)
+    .select('*')
+    .ilike('report_code', normalizedCode)
+    .limit(1)
+    .maybeSingle();
+
+  const row = assertSupabaseOk(
+    data,
+    error,
+    status,
+    'تعذر البحث عن البلاغ في قاعدة البيانات.'
+  );
+  const mapped = mapSupabaseRowToReport(row);
+  if (!mapped) {
+    return {
+      success: false,
+      data: null,
+      error: `لم يتم العثور على بلاغ بهذا الرقم (${normalizedCode}).`,
+      statusCode: 404,
+    };
+  }
+
+  return {
+    success: true,
+    data: mapped,
+    error: null,
+    statusCode: 200,
+  };
+}
+
+async function supabaseRegisterPushSubscription(
+  subscription: PushSubscriptionPayload,
+  reportIds: string[]
+): Promise<ApiResponse<PushSubscriptionPayload>> {
+  if (!supabase) throw new SupabaseConnectionError('Supabase unavailable');
+  if (reportIds.length > 0) {
+    const { error, status } = await supabase
+      .from(SUPABASE_REPORTS_TABLE)
+      .update({ push_subscription: subscription })
+      .in('id', reportIds);
+    if (error && isSupabaseConnectionFailure(error, status)) {
+      throw new SupabaseConnectionError('Supabase unavailable');
+    }
+  }
+  return {
+    success: true,
+    data: subscription,
+    error: null,
+    statusCode: 200,
+  };
+}
+
+async function supabaseCreateReport(
+  payload: CreateLostReportPayload,
+  cleanPhone: string,
+  pushSubscription: PushSubscriptionPayload | null
+): Promise<ApiResponse<LostReport>> {
+  if (!supabase) throw new SupabaseConnectionError('Supabase unavailable');
+
+  const faculty = String(payload.faculty || '').trim() as UniversityFaculty;
+  const studentName = String(payload.studentName || '').trim();
+  const itemName = String(payload.itemName || '').trim();
+  const description = String(payload.description || '').trim();
+  const locationType = payload.locationType;
+  const roomOrLocation = String(payload.roomOrLocation || '').trim();
+  const timePeriod = String(payload.timePeriod || '').trim();
+
+  if (!UNIVERSITY_FACULTIES.includes(faculty)) {
+    return {
+      success: false,
+      data: null,
+      error: 'يرجى اختيار كلية صالحة من القائمة.',
+      statusCode: 400,
+    };
+  }
+  if (studentName.split(/\s+/).filter(Boolean).length < 3 || studentName.length > 120) {
+    return {
+      success: false,
+      data: null,
+      error: 'يرجى إدخال اسم الطالب الثلاثي (بحد أقصى 120 حرفاً) كما في البطاقة الجامعية.',
+      statusCode: 400,
+    };
+  }
+  if (!itemName || itemName.length > 120) {
+    return {
+      success: false,
+      data: null,
+      error: 'يرجى كتابة اسم الغرض المفقود (بحد أقصى 120 حرفاً).',
+      statusCode: 400,
+    };
+  }
+  if (!description || description.length > 1000) {
+    return {
+      success: false,
+      data: null,
+      error: 'يرجى إدخال المواصفات الدقيقة للمطابقة (بحد أقصى 1000 حرف).',
+      statusCode: 400,
+    };
+  }
+  if (!LOCATION_TYPES.includes(locationType)) {
+    return {
+      success: false,
+      data: null,
+      error: 'يرجى اختيار نوع مكان صالح.',
+      statusCode: 400,
+    };
+  }
+  if (!roomOrLocation || roomOrLocation.length > 160) {
+    return {
+      success: false,
+      data: null,
+      error: 'يرجى تحديد رقم القاعة أو تفاصيل المكان (بحد أقصى 160 حرفاً).',
+      statusCode: 400,
+    };
+  }
+  if (!timePeriod || timePeriod.length > 100) {
+    return {
+      success: false,
+      data: null,
+      error: 'يرجى تحديد الفترة الزمنية (بحد أقصى 100 حرف).',
+      statusCode: 400,
+    };
+  }
+  if (!isValidYemeniPhone(cleanPhone)) {
+    return {
+      success: false,
+      data: null,
+      error: 'يرجى إدخال رقم جوال يمني صحيح مكون من 9 أرقام يبدأ بـ 7 (مثل 77xxxxxxx).',
+      statusCode: 400,
+    };
+  }
+
+  const {
+    data: conflicts,
+    error: conflictErr,
+    status: conflictStatus,
+  } = await supabase
+    .from(SUPABASE_REPORTS_TABLE)
+    .select('faculty')
+    .eq('phone_number', cleanPhone)
+    .neq('faculty', faculty)
+    .limit(1);
+
+  assertSupabaseOk(
+    conflicts,
+    conflictErr,
+    conflictStatus,
+    'تعذر التحقق من سجل الرقم.'
+  );
+
+  if (conflicts && conflicts.length > 0) {
+    const conflictFaculty = String(
+      (conflicts[0] as { faculty?: string }).faculty || ''
+    );
+    return {
+      success: false,
+      data: null,
+      error: `عذراً، هذا الرقم مسجل مسبقاً في ${conflictFaculty} ولا يمكن رفع بلاغات في أكثر من كلية`,
+      statusCode: 409,
+    };
+  }
+
+  const {
+    data: codeRows,
+    error: codeErr,
+    status: codeStatus,
+  } = await supabase
+    .from(SUPABASE_REPORTS_TABLE)
+    .select('report_code')
+    .order('created_at', { ascending: false })
+    .limit(500);
+
+  assertSupabaseOk(codeRows, codeErr, codeStatus, 'تعذر توليد رقم البلاغ.');
+
+  const maxSeq = (codeRows || []).reduce((max, row) => {
+    const code = String(
+      (row as { report_code?: string; reportCode?: string }).report_code ||
+        (row as { reportCode?: string }).reportCode ||
+        ''
+    );
+    const seq = extractLocalSequence(code);
+    return seq > max ? seq : max;
+  }, 100);
+
+  let nextSeq = Math.max(100, maxSeq) + 1;
+  const nowIso = new Date().toISOString();
+  const isUrgent = detectUrgentItem(itemName);
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const insertPayload: Record<string, unknown> = {
+      id: createUuid(),
+      report_code: `WS-${nextSeq}`,
+      student_name: studentName,
+      item_name: itemName,
+      description,
+      faculty,
+      location_type: locationType,
+      room_or_location: roomOrLocation,
+      time_period: timePeriod,
+      phone_number: cleanPhone,
+      is_urgent: isUrgent,
+      status: 'pending',
+      created_at: nowIso,
+      not_found_notified: false,
+    };
+    if (pushSubscription) {
+      insertPayload.push_subscription = pushSubscription;
+    }
+
+    const { data, error, status } = await supabase
+      .from(SUPABASE_REPORTS_TABLE)
+      .insert(insertPayload)
+      .select('*')
+      .single();
+
+    if (
+      error &&
+      (error as { code?: string }).code === '23505' &&
+      attempt === 0
+    ) {
+      nextSeq += 1;
+      continue;
+    }
+
+    const createdRow = assertSupabaseOk(
+      data,
+      error,
+      status,
+      'تعذر حفظ البلاغ في قاعدة البيانات.'
+    );
+    const mapped = mapSupabaseRowToReport(createdRow);
+    if (!mapped) {
+      return {
+        success: false,
+        data: null,
+        error: 'تعذر قراءة بيانات البلاغ المحفوظ.',
+        statusCode: 500,
+      };
+    }
+
+    return {
+      success: true,
+      data: {
+        ...mapped,
+        ownerToken: createLocalToken('sb'),
+      },
+      error: null,
+      statusCode: 201,
+    };
+  }
+
+  return {
+    success: false,
+    data: null,
+    error: 'تعذر حفظ البلاغ، يرجى المحاولة مجدداً.',
+    statusCode: 500,
+  };
+}
+
+async function fetchSupabaseReportById(
+  reportId: string
+): Promise<LostReport | null> {
+  if (!supabase) throw new SupabaseConnectionError('Supabase unavailable');
+  const { data, error, status } = await supabase
+    .from(SUPABASE_REPORTS_TABLE)
+    .select('*')
+    .eq('id', reportId)
+    .maybeSingle();
+
+  const row = assertSupabaseOk(
+    data,
+    error,
+    status,
+    'تعذر قراءة بيانات البلاغ.'
+  );
+  return mapSupabaseRowToReport(row);
+}
+
+async function supabaseUpdateReport(
+  reportId: string,
+  payload: UpdateLostReportPayload
+): Promise<ApiResponse<LostReport>> {
+  if (!supabase) throw new SupabaseConnectionError('Supabase unavailable');
+  const itemName = String(payload.itemName || '').trim();
+  const description = String(payload.description || '').trim();
+  const locationType = payload.locationType;
+  const roomOrLocation = String(payload.roomOrLocation || '').trim();
+  const timePeriod = String(payload.timePeriod || '').trim();
+
+  if (
+    !itemName ||
+    !description ||
+    !roomOrLocation ||
+    !timePeriod ||
+    !LOCATION_TYPES.includes(locationType)
+  ) {
+    return {
+      success: false,
+      data: null,
+      error: 'يرجى استكمال جميع بيانات البلاغ المطلوبة.',
+      statusCode: 400,
+    };
+  }
+
+  const target = await fetchSupabaseReportById(reportId);
+  if (!target) {
+    return {
+      success: false,
+      data: null,
+      error: 'لم يتم العثور على البلاغ المطلوب.',
+      statusCode: 404,
+    };
+  }
+  if (target.status !== 'pending') {
+    return {
+      success: false,
+      data: null,
+      error: 'يمكن تعديل بيانات البلاغ فقط أثناء بقائه قيد المراجعة.',
+      statusCode: 409,
+    };
+  }
+
+  const { data, error, status } = await supabase
+    .from(SUPABASE_REPORTS_TABLE)
+    .update({
+      item_name: itemName,
+      description,
+      location_type: locationType,
+      room_or_location: roomOrLocation,
+      time_period: timePeriod,
+      is_urgent: detectUrgentItem(itemName),
+    })
+    .eq('id', reportId)
+    .select('*')
+    .single();
+
+  const updatedRow = assertSupabaseOk(
+    data,
+    error,
+    status,
+    'تعذر تحديث بيانات البلاغ.'
+  );
+  const mapped = mapSupabaseRowToReport(updatedRow);
+  if (!mapped) {
+    return {
+      success: false,
+      data: null,
+      error: 'تعذر تحديث بيانات البلاغ.',
+      statusCode: 500,
+    };
+  }
+  return { success: true, data: mapped, error: null, statusCode: 200 };
+}
+
+async function supabaseMarkAsMatched(
+  reportId: string
+): Promise<ApiResponse<LostReport>> {
+  if (!supabase) throw new SupabaseConnectionError('Supabase unavailable');
+  if (!inMemoryLocalStaffFaculty) {
+    return {
+      success: false,
+      data: null,
+      error: 'يرجى تسجيل الدخول لبوابة المكتب أولاً.',
+      statusCode: 401,
+    };
+  }
+
+  const target = await fetchSupabaseReportById(reportId);
+  if (!target) {
+    return {
+      success: false,
+      data: null,
+      error: 'لم يتم العثور على البلاغ المطلوب.',
+      statusCode: 404,
+    };
+  }
+  if (target.faculty !== inMemoryLocalStaffFaculty) {
+    return {
+      success: false,
+      data: null,
+      error: 'لا يمكن تعديل بلاغ تابع لكلية أخرى.',
+      statusCode: 403,
+    };
+  }
+  if (target.status !== 'pending') {
+    return {
+      success: false,
+      data: null,
+      error: 'يمكن تأكيد العثور على الغرض للبلاغات التي لا تزال قيد المراجعة فقط.',
+      statusCode: 409,
+    };
+  }
+
+  const nowIso = new Date().toISOString();
+  const notification: ReportNotification = {
+    type: 'matched',
+    message: `غرضك «${target.itemName}» (بلاغ ${target.reportCode}) موجود الآن في مكتب شؤون الطلاب بـ (${target.faculty}). يرجى إحضار البطاقة الجامعية ورقم البلاغ عند الاستلام.`,
+    createdAt: nowIso,
+    unread: true,
+  };
+
+  const { data, error, status } = await supabase
+    .from(SUPABASE_REPORTS_TABLE)
+    .update({
+      status: 'matched',
+      matched_at: nowIso,
+      notification,
+    })
+    .eq('id', reportId)
+    .select('*')
+    .single();
+
+  const updatedRow = assertSupabaseOk(
+    data,
+    error,
+    status,
+    'تعذر تحديث حالة البلاغ.'
+  );
+  const mapped = mapSupabaseRowToReport(updatedRow);
+  if (!mapped) {
+    return {
+      success: false,
+      data: null,
+      error: 'تعذر تحديث حالة البلاغ.',
+      statusCode: 500,
+    };
+  }
+  return { success: true, data: mapped, error: null, statusCode: 200 };
+}
+
+async function supabaseResendPickupReminder(
+  reportId: string
+): Promise<ApiResponse<LostReport>> {
+  if (!supabase) throw new SupabaseConnectionError('Supabase unavailable');
+  if (!inMemoryLocalStaffFaculty) {
+    return {
+      success: false,
+      data: null,
+      error: 'يرجى تسجيل الدخول لبوابة المكتب أولاً.',
+      statusCode: 401,
+    };
+  }
+
+  const target = await fetchSupabaseReportById(reportId);
+  if (!target) {
+    return {
+      success: false,
+      data: null,
+      error: 'لم يتم العثور على البلاغ المطلوب.',
+      statusCode: 404,
+    };
+  }
+  if (target.faculty !== inMemoryLocalStaffFaculty) {
+    return {
+      success: false,
+      data: null,
+      error: 'لا يمكن إرسال تذكير لبلاغ تابع لكلية أخرى.',
+      statusCode: 403,
+    };
+  }
+  if (target.status !== 'matched') {
+    return {
+      success: false,
+      data: null,
+      error: 'يُتاح إرسال تذكير الاستلام للبلاغات الموجودة بالمكتب فقط.',
+      statusCode: 409,
+    };
+  }
+
+  const nowIso = new Date().toISOString();
+  const notification: ReportNotification = {
+    type: 'matched',
+    message: `تذكير بالاستلام: غرضك «${target.itemName}» (بلاغ ${target.reportCode}) لا يزال بانتظارك في مكتب شؤون الطلاب بـ (${target.faculty}). يرجى الحضور شخصياً وإبراز البطاقة الجامعية للاستلام.`,
+    createdAt: nowIso,
+    unread: true,
+  };
+
+  const { data, error, status } = await supabase
+    .from(SUPABASE_REPORTS_TABLE)
+    .update({ notification })
+    .eq('id', reportId)
+    .select('*')
+    .single();
+
+  const updatedRow = assertSupabaseOk(
+    data,
+    error,
+    status,
+    'تعذر إرسال تذكير الاستلام.'
+  );
+  const mapped = mapSupabaseRowToReport(updatedRow);
+  if (!mapped) {
+    return {
+      success: false,
+      data: null,
+      error: 'تعذر إرسال تذكير الاستلام.',
+      statusCode: 500,
+    };
+  }
+  return { success: true, data: mapped, error: null, statusCode: 200 };
+}
+
+async function supabaseNotifyNotFoundYet(
+  reportId: string
+): Promise<ApiResponse<LostReport>> {
+  if (!supabase) throw new SupabaseConnectionError('Supabase unavailable');
+  if (!inMemoryLocalStaffFaculty) {
+    return {
+      success: false,
+      data: null,
+      error: 'يرجى تسجيل الدخول لبوابة المكتب أولاً.',
+      statusCode: 401,
+    };
+  }
+
+  const target = await fetchSupabaseReportById(reportId);
+  if (!target) {
+    return {
+      success: false,
+      data: null,
+      error: 'لم يتم العثور على البلاغ المطلوب.',
+      statusCode: 404,
+    };
+  }
+  if (target.faculty !== inMemoryLocalStaffFaculty) {
+    return {
+      success: false,
+      data: null,
+      error: 'لا يمكن تحديث بلاغ تابع لكلية أخرى.',
+      statusCode: 403,
+    };
+  }
+  if (target.status !== 'pending') {
+    return {
+      success: false,
+      data: null,
+      error: 'لا يمكن إرسال إشعار عدم العثور على الغرض بعد تأكيد وجوده أو إغلاقه.',
+      statusCode: 409,
+    };
+  }
+
+  const nowIso = new Date().toISOString();
+  const notification: ReportNotification = {
+    type: 'not_found',
+    message: NOT_FOUND_NOTIFICATION_MESSAGE,
+    createdAt: nowIso,
+    unread: true,
+  };
+
+  const { data, error, status } = await supabase
+    .from(SUPABASE_REPORTS_TABLE)
+    .update({
+      status: 'pending',
+      not_found_notified: true,
+      last_checked_at: nowIso,
+      notification,
+    })
+    .eq('id', reportId)
+    .select('*')
+    .single();
+
+  const updatedRow = assertSupabaseOk(
+    data,
+    error,
+    status,
+    'تعذر تسجيل إشعار عدم العثور على الغرض.'
+  );
+  const mapped = mapSupabaseRowToReport(updatedRow);
+  if (!mapped) {
+    return {
+      success: false,
+      data: null,
+      error: 'تعذر تسجيل إشعار عدم العثور على الغرض.',
+      statusCode: 500,
+    };
+  }
+  return { success: true, data: mapped, error: null, statusCode: 200 };
+}
+
+async function supabaseMarkNotificationAsRead(
+  reportId: string
+): Promise<ApiResponse<LostReport>> {
+  if (!supabase) throw new SupabaseConnectionError('Supabase unavailable');
+  const target = await fetchSupabaseReportById(reportId);
+  if (!target) {
+    return {
+      success: false,
+      data: null,
+      error: 'لم يتم العثور على البلاغ المطلوب.',
+      statusCode: 404,
+    };
+  }
+
+  const nowIso = new Date().toISOString();
+  const notification: ReportNotification = target.notification
+    ? {
+        ...target.notification,
+        unread: false,
+        readAt: nowIso,
+      }
+    : {
+        type: target.status === 'matched' ? 'matched' : 'not_found',
+        message:
+          target.status === 'matched'
+            ? `غرضك «${target.itemName}» موجود بالمكتب. يرجى إحضار البطاقة الجامعية ورقم البلاغ عند الاستلام.`
+            : NOT_FOUND_NOTIFICATION_MESSAGE,
+        createdAt: target.matchedAt || target.lastCheckedAt || nowIso,
+        unread: false,
+        readAt: nowIso,
+      };
+
+  const { data, error, status } = await supabase
+    .from(SUPABASE_REPORTS_TABLE)
+    .update({ notification })
+    .eq('id', reportId)
+    .select('*')
+    .single();
+
+  const updatedRow = assertSupabaseOk(
+    data,
+    error,
+    status,
+    'تعذر تحديث حالة قراءة الإشعار.'
+  );
+  const mapped = mapSupabaseRowToReport(updatedRow);
+  if (!mapped) {
+    return {
+      success: false,
+      data: null,
+      error: 'تعذر تحديث حالة قراءة الإشعار.',
+      statusCode: 500,
+    };
+  }
+  return { success: true, data: mapped, error: null, statusCode: 200 };
+}
+
+async function supabaseConfirmDelivery(
+  reportId: string
+): Promise<ApiResponse<LostReport>> {
+  if (!supabase) throw new SupabaseConnectionError('Supabase unavailable');
+  if (!inMemoryLocalStaffFaculty) {
+    return {
+      success: false,
+      data: null,
+      error: 'يرجى تسجيل الدخول لبوابة المكتب أولاً.',
+      statusCode: 401,
+    };
+  }
+
+  const target = await fetchSupabaseReportById(reportId);
+  if (!target) {
+    return {
+      success: false,
+      data: null,
+      error: 'لم يتم العثور على البلاغ المطلوب.',
+      statusCode: 404,
+    };
+  }
+  if (target.faculty !== inMemoryLocalStaffFaculty) {
+    return {
+      success: false,
+      data: null,
+      error: 'لا يمكن تسليم بلاغ تابع لكلية أخرى.',
+      statusCode: 403,
+    };
+  }
+  if (target.status !== 'matched') {
+    return {
+      success: false,
+      data: null,
+      error: 'يجب أولاً تأكيد العثور على الغرض بالمكتب قبل تسجيل التسليم النهائي.',
+      statusCode: 409,
+    };
+  }
+
+  const nowIso = new Date().toISOString();
+  const updatePayload: Record<string, unknown> = {
+    status: 'delivered',
+    delivered_at: nowIso,
+  };
+  if (target.notification) {
+    updatePayload.notification = {
+      ...target.notification,
+      unread: false,
+      readAt: target.notification.readAt ?? nowIso,
+    };
+  }
+
+  const { data, error, status } = await supabase
+    .from(SUPABASE_REPORTS_TABLE)
+    .update(updatePayload)
+    .eq('id', reportId)
+    .select('*')
+    .single();
+
+  const updatedRow = assertSupabaseOk(
+    data,
+    error,
+    status,
+    'تعذر تأكيد التسليم النهائي.'
+  );
+  const mapped = mapSupabaseRowToReport(updatedRow);
+  if (!mapped) {
+    return {
+      success: false,
+      data: null,
+      error: 'تعذر تأكيد التسليم النهائي.',
+      statusCode: 500,
+    };
+  }
+  return { success: true, data: mapped, error: null, statusCode: 200 };
+}
+
+async function supabaseCancelReport(
+  reportId: string
+): Promise<ApiResponse<LostReport>> {
+  if (!supabase) throw new SupabaseConnectionError('Supabase unavailable');
+  const target = await fetchSupabaseReportById(reportId);
+  if (!target) {
+    return {
+      success: false,
+      data: null,
+      error: 'لم يتم العثور على البلاغ المطلوب.',
+      statusCode: 404,
+    };
+  }
+  if (target.status !== 'pending') {
+    return {
+      success: false,
+      data: null,
+      error:
+        target.status === 'matched'
+          ? 'لا يمكن سحب البلاغ بعد العثور على الغرض؛ يرجى الحضور شخصياً لمكتب شؤون الطلاب مع البطاقة الجامعية للاستلام.'
+          : 'لا يمكن سحب هذا البلاغ في حالته الحالية.',
+      statusCode: 409,
+    };
+  }
+
+  const { data, error, status } = await supabase
+    .from(SUPABASE_REPORTS_TABLE)
+    .update({
+      status: 'cancelled',
+      cancelled_at: new Date().toISOString(),
+    })
+    .eq('id', reportId)
+    .select('*')
+    .single();
+
+  const updatedRow = assertSupabaseOk(
+    data,
+    error,
+    status,
+    'تعذر سحب البلاغ.'
+  );
+  const mapped = mapSupabaseRowToReport(updatedRow);
+  if (!mapped) {
+    return {
+      success: false,
+      data: null,
+      error: 'تعذر سحب البلاغ.',
+      statusCode: 500,
+    };
+  }
+  return { success: true, data: mapped, error: null, statusCode: 200 };
+}
+
+async function supabaseDeleteReport(
+  reportId: string
+): Promise<ApiResponse<{ deletedId: string }>> {
+  if (!supabase) throw new SupabaseConnectionError('Supabase unavailable');
+  const target = await fetchSupabaseReportById(reportId);
+  if (!target) {
+    return {
+      success: false,
+      data: null,
+      error: 'لم يتم العثور على البلاغ المطلوب.',
+      statusCode: 404,
+    };
+  }
+  if (target.status !== 'cancelled' && target.status !== 'delivered') {
+    return {
+      success: false,
+      data: null,
+      error: 'لا يمكن حذف بلاغ نشط؛ يمكن حذف البلاغات المسحوبة أو المسلّمة فقط.',
+      statusCode: 409,
+    };
+  }
+
+  const { error, status } = await supabase
+    .from(SUPABASE_REPORTS_TABLE)
+    .delete()
+    .eq('id', reportId);
+
+  assertSupabaseOk(null, error, status, 'تعذر حذف البلاغ.');
+  return {
+    success: true,
+    data: { deletedId: reportId },
+    error: null,
+    statusCode: 200,
+  };
+}
+
 /**
- * طبقة الاتصال بالخادم مع الوضع الاحتياطي المحلي التلقائي (REST API + localStorage Fallback)
+ * طبقة الاتصال بالخادم أو Supabase مع الوضع الاحتياطي المحلي التلقائي (localStorage Fallback)
  */
 export const apiService = {
   async getStaffAuthStatus(
     faculty: UniversityFaculty
   ): Promise<ApiResponse<StaffAuthStatus>> {
+    if (isSupabaseConfigured()) {
+      return localGetStaffAuthStatus(faculty);
+    }
     return executeWithFallback<StaffAuthStatus>(
       () =>
         fetch(
@@ -1547,6 +2531,9 @@ export const apiService = {
     faculty: UniversityFaculty,
     passcode: string
   ): Promise<ApiResponse<StaffSession>> {
+    if (isSupabaseConfigured()) {
+      return localStaffLogin(faculty, passcode);
+    }
     const result = await executeWithFallback<StaffSession>(
       () =>
         fetch(`${STAFF_API_BASE_URL}/setup`, {
@@ -1555,7 +2542,7 @@ export const apiService = {
           body: JSON.stringify({ faculty, passcode }),
         }),
       'تعذر إعداد رمز دخول الكلية.',
-      () => localSetupStaffPasscode(faculty, passcode)
+      () => localStaffLogin(faculty, passcode)
     );
     if (result.success && result.data?.token) {
       inMemoryStaffToken = result.data.token;
@@ -1564,47 +2551,13 @@ export const apiService = {
     return result;
   },
 
-  async resetLocalStaffPasscode(
-    faculty: UniversityFaculty
-  ): Promise<ApiResponse<StaffAuthStatus>> {
-    if (!localFallbackActive && !inMemoryLocalStaffFaculty) {
-      return {
-        success: false,
-        data: null,
-        error: 'إعادة التعيين المحلية متاحة فقط عند العمل في الوضع المحلي الاحتياطي.',
-        statusCode: 403,
-      };
-    }
-    if (!UNIVERSITY_FACULTIES.includes(faculty)) {
-      return {
-        success: false,
-        data: null,
-        error: 'الكلية المحددة غير صالحة.',
-        statusCode: 400,
-      };
-    }
-    const records = readLocalStaffPasscodes();
-    delete records[faculty];
-    writeLocalStaffPasscodes(records);
-    if (inMemoryLocalStaffFaculty === faculty) {
-      inMemoryLocalStaffFaculty = null;
-    }
-    return {
-      success: true,
-      data: {
-        faculty,
-        needsSetup: true,
-        localFallback: true,
-      },
-      error: null,
-      statusCode: 200,
-    };
-  },
-
   async staffLogin(
     faculty: UniversityFaculty,
     passcode: string
   ): Promise<ApiResponse<StaffSession>> {
+    if (isSupabaseConfigured()) {
+      return localStaffLogin(faculty, passcode);
+    }
     const result = await executeWithFallback<StaffSession>(
       () =>
         fetch(`${STAFF_API_BASE_URL}/login`, {
@@ -1675,6 +2628,13 @@ export const apiService = {
   },
 
   async getReports(): Promise<ApiResponse<LostReport[]>> {
+    if (isSupabaseConfigured()) {
+      return executeSupabaseWithFallback(
+        () => supabaseGetReports(),
+        () => localGetReports()
+      );
+    }
+
     const result = await executeWithFallback<LostReport[]>(
       () => {
         const myEntries = readMyReportEntries()
@@ -1716,6 +2676,12 @@ export const apiService = {
 
   async getReportByCode(rawCode: string): Promise<ApiResponse<LostReport>> {
     const normalizedCode = rawCode.trim().toUpperCase();
+    if (isSupabaseConfigured()) {
+      return executeSupabaseWithFallback(
+        () => supabaseGetReportByCode(normalizedCode),
+        () => localGetReportByCode(normalizedCode)
+      );
+    }
     return executeWithFallback<LostReport>(
       () =>
         fetch(`${API_BASE_URL}/code/${encodeURIComponent(normalizedCode)}`, {
@@ -1731,6 +2697,13 @@ export const apiService = {
     reportIds: string[] = []
   ): Promise<ApiResponse<PushSubscriptionPayload>> {
     savePushSubscriptionLocally(subscription);
+
+    if (isSupabaseConfigured()) {
+      return executeSupabaseWithFallback(
+        () => supabaseRegisterPushSubscription(subscription, reportIds),
+        () => localRegisterPushSubscription(subscription, reportIds)
+      );
+    }
 
     return executeWithFallback<PushSubscriptionPayload>(
       () => {
@@ -1759,20 +2732,25 @@ export const apiService = {
     const pushSubscription =
       payload.pushSubscription ?? readSavedPushSubscription();
 
-    const result = await executeWithFallback<LostReport>(
-      () =>
-        fetch(API_BASE_URL, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            ...payload,
-            phoneNumber: cleanPhone,
-            pushSubscription,
-          }),
-        }),
-      'تعذر حفظ البلاغ على الخادم.',
-      () => localCreateReport(payload, cleanPhone, pushSubscription)
-    );
+    const result = isSupabaseConfigured()
+      ? await executeSupabaseWithFallback(
+          () => supabaseCreateReport(payload, cleanPhone, pushSubscription),
+          () => localCreateReport(payload, cleanPhone, pushSubscription)
+        )
+      : await executeWithFallback<LostReport>(
+          () =>
+            fetch(API_BASE_URL, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                ...payload,
+                phoneNumber: cleanPhone,
+                pushSubscription,
+              }),
+            }),
+          'تعذر حفظ البلاغ على الخادم.',
+          () => localCreateReport(payload, cleanPhone, pushSubscription)
+        );
 
     if (result.success && result.data) {
       saveStudentProfile({
@@ -1794,6 +2772,12 @@ export const apiService = {
     reportId: string,
     payload: UpdateLostReportPayload
   ): Promise<ApiResponse<LostReport>> {
+    if (isSupabaseConfigured()) {
+      return executeSupabaseWithFallback(
+        () => supabaseUpdateReport(reportId, payload),
+        () => localUpdateReport(reportId, payload)
+      );
+    }
     const ownerToken = getOwnerTokenForReport(reportId);
     return executeWithFallback<LostReport>(
       () =>
@@ -1811,6 +2795,12 @@ export const apiService = {
   },
 
   async markAsMatched(id: string): Promise<ApiResponse<LostReport>> {
+    if (isSupabaseConfigured()) {
+      return executeSupabaseWithFallback(
+        () => supabaseMarkAsMatched(id),
+        () => localMarkAsMatched(id)
+      );
+    }
     return executeWithFallback<LostReport>(
       () =>
         fetch(`${API_BASE_URL}/${encodeURIComponent(id)}/match`, {
@@ -1825,6 +2815,12 @@ export const apiService = {
   async resendPickupReminder(
     reportId: string
   ): Promise<ApiResponse<LostReport>> {
+    if (isSupabaseConfigured()) {
+      return executeSupabaseWithFallback(
+        () => supabaseResendPickupReminder(reportId),
+        () => localResendPickupReminder(reportId)
+      );
+    }
     return executeWithFallback<LostReport>(
       () =>
         fetch(
@@ -1840,6 +2836,12 @@ export const apiService = {
   },
 
   async notifyNotFoundYet(reportId: string): Promise<ApiResponse<LostReport>> {
+    if (isSupabaseConfigured()) {
+      return executeSupabaseWithFallback(
+        () => supabaseNotifyNotFoundYet(reportId),
+        () => localNotifyNotFoundYet(reportId)
+      );
+    }
     return executeWithFallback<LostReport>(
       () =>
         fetch(
@@ -1857,6 +2859,12 @@ export const apiService = {
   async markNotificationAsRead(
     reportId: string
   ): Promise<ApiResponse<LostReport>> {
+    if (isSupabaseConfigured()) {
+      return executeSupabaseWithFallback(
+        () => supabaseMarkNotificationAsRead(reportId),
+        () => localMarkNotificationAsRead(reportId)
+      );
+    }
     const ownerToken = getOwnerTokenForReport(reportId);
     return executeWithFallback<LostReport>(
       () =>
@@ -1876,6 +2884,12 @@ export const apiService = {
   },
 
   async confirmDelivery(reportId: string): Promise<ApiResponse<LostReport>> {
+    if (isSupabaseConfigured()) {
+      return executeSupabaseWithFallback(
+        () => supabaseConfirmDelivery(reportId),
+        () => localConfirmDelivery(reportId)
+      );
+    }
     return executeWithFallback<LostReport>(
       () =>
         fetch(`${API_BASE_URL}/${encodeURIComponent(reportId)}/deliver`, {
@@ -1889,6 +2903,12 @@ export const apiService = {
   },
 
   async cancelReport(reportId: string): Promise<ApiResponse<LostReport>> {
+    if (isSupabaseConfigured()) {
+      return executeSupabaseWithFallback(
+        () => supabaseCancelReport(reportId),
+        () => localCancelReport(reportId)
+      );
+    }
     const ownerToken = getOwnerTokenForReport(reportId);
     return executeWithFallback<LostReport>(
       () =>
@@ -1907,6 +2927,12 @@ export const apiService = {
   async deleteReport(
     reportId: string
   ): Promise<ApiResponse<{ deletedId: string }>> {
+    if (isSupabaseConfigured()) {
+      return executeSupabaseWithFallback(
+        () => supabaseDeleteReport(reportId),
+        () => localDeleteReport(reportId)
+      );
+    }
     const ownerToken = getOwnerTokenForReport(reportId);
     return executeWithFallback<{ deletedId: string }>(
       () =>
@@ -1925,7 +2951,6 @@ export const apiService = {
     try {
       localStorage.removeItem(OFFLINE_CACHE_KEY);
       localStorage.removeItem(LOCAL_SEQUENCE_KEY);
-      localStorage.removeItem(LOCAL_STAFF_PASSCODES_KEY);
       for (const key of LEGACY_STORAGE_KEYS) {
         localStorage.removeItem(key);
       }

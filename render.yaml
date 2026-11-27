@@ -11,7 +11,3 @@ services:
         value: production
       - key: STAFF_SESSION_SECRET
         generateValue: true
-      - key: STAFF_PASSCODES_JSON
-        sync: false
-      - key: DATA_FILE_PATH
-        sync: false

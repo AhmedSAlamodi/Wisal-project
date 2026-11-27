@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import {
   AlertTriangle,
   Archive,
@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import {
   apiService,
+  DEMO_FACULTY_PASSCODES,
   detectUrgentItem,
   formatPhoneForDisplay,
   isUsingLocalFallback,
@@ -113,9 +114,10 @@ export function StaffPortalView({
   );
   const [isCheckingStatus, setIsCheckingStatus] = useState(true);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
-  const [confirmingLocalReset, setConfirmingLocalReset] = useState(false);
-  const [isResettingLocalPasscode, setIsResettingLocalPasscode] =
-    useState(false);
+  const [copiedDemoFaculty, setCopiedDemoFaculty] =
+    useState<UniversityFaculty | null>(null);
+  const pendingDemoCodeRef = useRef<string | null>(null);
+  const demoFeedbackTimerRef = useRef<number | null>(null);
 
   const [activeTab, setActiveTab] = useState<LostReportStatus>('pending');
   const [searchQuery, setSearchQuery] = useState('');
@@ -125,13 +127,25 @@ export function StaffPortalView({
   } | null>(null);
 
   useEffect(() => {
+    return () => {
+      if (demoFeedbackTimerRef.current !== null) {
+        window.clearTimeout(demoFeedbackTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     if (staffFaculty) return;
     let cancelled = false;
     setIsCheckingStatus(true);
     setLoginError(null);
-    setPasscode('');
+    if (pendingDemoCodeRef.current !== null) {
+      setPasscode(pendingDemoCodeRef.current);
+      pendingDemoCodeRef.current = null;
+    } else {
+      setPasscode('');
+    }
     setConfirmPasscode('');
-    setConfirmingLocalReset(false);
 
     apiService.getStaffAuthStatus(selectedFaculty).then((res) => {
       if (cancelled) return;
@@ -279,9 +293,7 @@ export function StaffPortalView({
     if (!res.success || !res.data) {
       if (isUsingLocalFallback()) {
         setIsLocalFallback(true);
-        if (res.statusCode === 409) {
-          setNeedsSetup(true);
-        }
+        setNeedsSetup(false);
       }
       const msg =
         res.error ||
@@ -294,39 +306,36 @@ export function StaffPortalView({
     setPasscode('');
     setConfirmPasscode('');
     setShowPasscode(false);
-    setConfirmingLocalReset(false);
     setIsLocalFallback(
       Boolean(res.data.localFallback) || isUsingLocalFallback()
     );
     onLogin(selectedFaculty);
   };
 
-  const handleResetLocalPasscode = async () => {
-    if (isResettingLocalPasscode || isAuthenticating) return;
-    setIsResettingLocalPasscode(true);
-    setLoginError(null);
-
-    const res = await apiService.resetLocalStaffPasscode(selectedFaculty);
-    setIsResettingLocalPasscode(false);
-
-    if (!res.success) {
-      const msg = res.error || 'تعذر إعادة تعيين الرمز المحلي.';
-      setLoginError(msg);
-      onLoginError(msg);
-      return;
-    }
-
-    setPasscode('');
+  const handleSelectDemoFaculty = (faculty: UniversityFaculty) => {
+    const demoCode = DEMO_FACULTY_PASSCODES[faculty];
+    pendingDemoCodeRef.current = faculty === selectedFaculty ? null : demoCode;
+    setSelectedFaculty(faculty);
+    setPasscode(demoCode);
     setConfirmPasscode('');
-    setShowPasscode(false);
-    setConfirmingLocalReset(false);
-    setNeedsSetup(true);
-    setIsLocalFallback(true);
+    setLoginError(null);
+    setCopiedDemoFaculty(faculty);
+    if (demoFeedbackTimerRef.current !== null) {
+      window.clearTimeout(demoFeedbackTimerRef.current);
+    }
+    demoFeedbackTimerRef.current = window.setTimeout(() => {
+      setCopiedDemoFaculty(null);
+    }, 1800);
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      void navigator.clipboard.writeText(demoCode).catch(() => {
+        // تجاهل في حال عدم توفر صلاحية الحافظة
+      });
+    }
   };
 
   if (!staffFaculty) {
     return (
-      <div className="max-w-md mx-auto">
+      <div className="max-w-md mx-auto space-y-4">
         <section className="bg-white border border-[#E2E8F0] rounded-xl shadow-xs p-6 space-y-5">
           <div className="flex items-start gap-3">
             <ShieldCheck
@@ -381,29 +390,10 @@ export function StaffPortalView({
 
             {needsSetup && !isCheckingStatus && (
               <div className="p-3 rounded-lg bg-[#F5F7FA] border border-[#E2E8F0] text-xs text-slate-700 leading-relaxed">
-                {isLocalFallback ? (
-                  <>
-                    الوضع المحلي (بدون خادم خلفي): لم يتم تعيين رمز دخول محفوظ
-                    لـ <strong className="text-[#0F2942]">{selectedFaculty}</strong>{' '}
-                    في هذا المتصفح بعد. أنشئ رمزاً خاصاً بالكلية الآن (6 أحرف
-                    على الأقل) لحفظه والدخول مباشرة.
-                  </>
-                ) : (
-                  <>
-                    لم يتم تعيين رمز دخول أمني لـ{' '}
-                    <strong className="text-[#0F2942]">{selectedFaculty}</strong>{' '}
-                    بعد. أنشئ رمزاً خاصاً بالكلية الآن (6 أحرف على الأقل) لتأمين
-                    البوابة.
-                  </>
-                )}
-              </div>
-            )}
-
-            {isLocalFallback && !isCheckingStatus && !needsSetup && (
-              <div className="p-3 rounded-lg bg-[#F5F7FA] border border-[#E2E8F0] text-xs text-slate-700 leading-relaxed">
-                الوضع المحلي (بدون خادم خلفي): أدخل الرمز المحفوظ في هذا
-                المتصفح لـ{' '}
-                <strong className="text-[#0F2942]">{selectedFaculty}</strong>.
+                لم يتم تعيين رمز دخول أمني لـ{' '}
+                <strong className="text-[#0F2942]">{selectedFaculty}</strong>{' '}
+                بعد. أنشئ رمزاً خاصاً بالكلية الآن (6 أحرف على الأقل) لتأمين
+                البوابة.
               </div>
             )}
 
@@ -498,66 +488,69 @@ export function StaffPortalView({
                   : 'دخول إلى لوحة المكتب'}
               </span>
             </button>
-
-            {isLocalFallback && !isCheckingStatus && !needsSetup && (
-              <div className="pt-2 border-t border-[#E2E8F0]">
-                {!confirmingLocalReset ? (
-                  <div className="flex items-center justify-between gap-2 text-xs">
-                    <span className="text-slate-500">
-                      هل نسيت الرمز المحفوظ لهذه الكلية؟
-                    </span>
-                    <button
-                      type="button"
-                      disabled={isAuthenticating || isResettingLocalPasscode}
-                      onClick={() => {
-                        setConfirmingLocalReset(true);
-                        setLoginError(null);
-                      }}
-                      className="text-xs font-semibold text-[#0F2942] hover:underline disabled:opacity-60 cursor-pointer py-1 px-1"
-                    >
-                      إعادة تعيين الرمز المحلي
-                    </button>
-                  </div>
-                ) : (
-                  <div className="p-3 rounded-lg bg-[#F5F7FA] border border-[#E2E8F0] space-y-2.5">
-                    <p className="text-xs text-slate-700 leading-relaxed">
-                      سيتم حذف الرمز المحلي المحفوظ لـ{' '}
-                      <strong className="text-[#0F2942]">
-                        {selectedFaculty}
-                      </strong>{' '}
-                      لتتمكن من تعيين رمز جديد.
-                    </p>
-                    <div className="grid grid-cols-2 gap-2">
-                      <button
-                        type="button"
-                        disabled={isResettingLocalPasscode}
-                        onClick={() => void handleResetLocalPasscode()}
-                        className="inline-flex items-center justify-center gap-1.5 px-3 py-2 min-h-[38px] rounded-lg bg-[#0F2942] hover:bg-[#163859] disabled:opacity-70 text-white text-xs font-semibold transition-all active:scale-[0.99] cursor-pointer"
-                      >
-                        {isResettingLocalPasscode && (
-                          <Loader2
-                            className="w-3.5 h-3.5 animate-spin shrink-0"
-                            strokeWidth={1.6}
-                            aria-hidden="true"
-                          />
-                        )}
-                        <span>تأكيد إعادة التعيين</span>
-                      </button>
-                      <button
-                        type="button"
-                        disabled={isResettingLocalPasscode}
-                        onClick={() => setConfirmingLocalReset(false)}
-                        className="inline-flex items-center justify-center px-3 py-2 min-h-[38px] rounded-lg bg-white hover:bg-slate-100 border border-[#E2E8F0] text-slate-700 text-xs font-semibold transition-all active:scale-[0.99] cursor-pointer"
-                      >
-                        إلغاء
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
           </form>
         </section>
+
+        {isLocalFallback && !isCheckingStatus && !needsSetup && (
+          <section
+            aria-label="رموز التجربة لمكاتب الكليات"
+            className="bg-white border border-[#E2E8F0] rounded-xl shadow-xs p-5 space-y-3"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <KeyRound
+                  className="w-4 h-4 text-[#0F2942] shrink-0"
+                  strokeWidth={1.6}
+                  aria-hidden="true"
+                />
+                <h2 className="text-sm font-bold text-[#0F2942]">
+                  رموز التجربة لمكاتب الكليات
+                </h2>
+              </div>
+              <span className="text-[11px] font-medium text-slate-500">
+                اضغط للاختيار والنسخ
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 gap-1.5">
+              {UNIVERSITY_FACULTIES.map((faculty) => {
+                const code = DEMO_FACULTY_PASSCODES[faculty];
+                const isSelected = selectedFaculty === faculty;
+                const isCopied = copiedDemoFaculty === faculty;
+                return (
+                  <button
+                    key={faculty}
+                    type="button"
+                    disabled={isAuthenticating}
+                    onClick={() => handleSelectDemoFaculty(faculty)}
+                    className={`w-full flex items-center justify-between gap-2 px-3 py-2 min-h-[40px] rounded-lg border text-right transition-colors cursor-pointer disabled:opacity-60 ${
+                      isSelected
+                        ? 'bg-[#0F2942]/5 border-[#0F2942]/40'
+                        : 'bg-[#F5F7FA] border-[#E2E8F0] hover:bg-slate-100'
+                    }`}
+                  >
+                    <span className="text-xs font-semibold text-[#0F2942] truncate">
+                      {faculty}
+                    </span>
+                    <span className="inline-flex items-center gap-1.5 shrink-0">
+                      {isCopied && (
+                        <span className="text-[11px] font-semibold text-[#166534]">
+                          تم الاختيار
+                        </span>
+                      )}
+                      <span
+                        dir="ltr"
+                        className="px-2 py-0.5 rounded bg-white border border-[#E2E8F0] font-mono text-xs font-bold tabular-nums text-[#0F2942]"
+                      >
+                        {code}
+                      </span>
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+        )}
       </div>
     );
   }
