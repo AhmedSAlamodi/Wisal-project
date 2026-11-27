@@ -26,6 +26,7 @@ import {
   triggerPickupReminderBrowserNotification,
 } from './services/apiService';
 import { useOnlineStatus } from './services/pwaService';
+import { isSupabaseConfigured, supabase } from './services/supabaseClient';
 import type {
   AppMode,
   CreateLostReportPayload,
@@ -177,6 +178,44 @@ export default function App() {
 
   useEffect(() => {
     void fetchReports();
+  }, [fetchReports]);
+
+  useEffect(() => {
+    if (!isSupabaseConfigured() || !supabase) return;
+    const client = supabase;
+    let syncTimer: number | null = null;
+
+    const scheduleSync = () => {
+      if (syncTimer !== null) {
+        window.clearTimeout(syncTimer);
+      }
+      syncTimer = window.setTimeout(() => {
+        syncTimer = null;
+        void fetchReports({ silent: true });
+      }, 350);
+    };
+
+    const channel = client
+      .channel('wisal-reports-realtime')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'reports' },
+        () => {
+          scheduleSync();
+        }
+      )
+      .subscribe((status) => {
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          console.warn(`[Wisal Supabase] Realtime channel status: ${status}`);
+        }
+      });
+
+    return () => {
+      if (syncTimer !== null) {
+        window.clearTimeout(syncTimer);
+      }
+      void client.removeChannel(channel);
+    };
   }, [fetchReports]);
 
   const isOnline = useOnlineStatus();

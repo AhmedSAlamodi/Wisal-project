@@ -31,9 +31,26 @@ function isValidSupabaseUrl(rawUrl: string): boolean {
 
 const supabaseUrl = readViteEnv('VITE_SUPABASE_URL');
 const supabaseAnonKey = readViteEnv('VITE_SUPABASE_ANON_KEY');
+const hasValidUrl = isValidSupabaseUrl(supabaseUrl);
+
+if (!hasValidUrl || !supabaseAnonKey) {
+  if (!supabaseUrl && !supabaseAnonKey) {
+    console.warn(
+      '[Wisal Supabase] Missing VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY; falling back to localStorage.'
+    );
+  } else if (!hasValidUrl) {
+    console.warn(
+      '[Wisal Supabase] Invalid VITE_SUPABASE_URL; falling back to localStorage.'
+    );
+  } else {
+    console.warn(
+      '[Wisal Supabase] Missing VITE_SUPABASE_ANON_KEY; falling back to localStorage.'
+    );
+  }
+}
 
 export const supabase: SupabaseClient | null =
-  isValidSupabaseUrl(supabaseUrl) && Boolean(supabaseAnonKey)
+  hasValidUrl && Boolean(supabaseAnonKey)
     ? createClient(supabaseUrl, supabaseAnonKey, {
         auth: {
           persistSession: false,

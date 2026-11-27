@@ -1368,6 +1368,8 @@ function isSupabaseConnectionFailure(
     const msg = String(errObj.message || '').toLowerCase();
     if (
       code === '42P01' ||
+      code === '42703' ||
+      code === 'PGRST204' ||
       code === 'PGRST205' ||
       code === 'PGRST301' ||
       code === 'PGRST000' ||
@@ -1589,8 +1591,13 @@ async function executeSupabaseWithFallback<T>(
     return await supabaseCall();
   } catch (err) {
     if (isSupabaseConnectionFailure(err)) {
+      console.warn(
+        '[Wisal Supabase] Request failed; falling back to localStorage.',
+        err instanceof Error ? err.message : err
+      );
       return await localHandler();
     }
+    console.error('[Wisal Supabase] Unexpected operation error:', err);
     return {
       success: false,
       data: null,
@@ -1645,7 +1652,8 @@ async function supabaseGetReports(): Promise<ApiResponse<LostReport[]>> {
   let queryResult = await supabase
     .from(SUPABASE_REPORTS_TABLE)
     .select('*')
-    .in('id', myIds);
+    .in('id', myIds)
+    .order('created_at', { ascending: false });
 
   if (
     queryResult.error &&
@@ -1658,7 +1666,8 @@ async function supabaseGetReports(): Promise<ApiResponse<LostReport[]>> {
     queryResult = await supabase
       .from(SUPABASE_REPORTS_TABLE)
       .select('*')
-      .in('id', uuidIds);
+      .in('id', uuidIds)
+      .order('created_at', { ascending: false });
   }
 
   const rows = assertSupabaseOk(
@@ -1892,6 +1901,7 @@ async function supabaseCreateReport(
   let nextSeq = Math.max(100, maxSeq) + 1;
   const nowIso = new Date().toISOString();
   const isUrgent = detectUrgentItem(itemName);
+  const ownerToken = createLocalToken('sb');
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const insertPayload: Record<string, unknown> = {
@@ -1909,6 +1919,7 @@ async function supabaseCreateReport(
       status: 'pending',
       created_at: nowIso,
       not_found_notified: false,
+      owner_token: ownerToken,
     };
     if (pushSubscription) {
       insertPayload.push_subscription = pushSubscription;
@@ -1949,7 +1960,7 @@ async function supabaseCreateReport(
       success: true,
       data: {
         ...mapped,
-        ownerToken: createLocalToken('sb'),
+        ownerToken,
       },
       error: null,
       statusCode: 201,
@@ -1964,9 +1975,9 @@ async function supabaseCreateReport(
   };
 }
 
-async function fetchSupabaseReportById(
+async function fetchSupabaseReportWithOwnerById(
   reportId: string
-): Promise<LostReport | null> {
+): Promise<{ report: LostReport; ownerToken: string | null } | null> {
   if (!supabase) throw new SupabaseConnectionError('Supabase unavailable');
   const { data, error, status } = await supabase
     .from(SUPABASE_REPORTS_TABLE)
@@ -1980,7 +1991,31 @@ async function fetchSupabaseReportById(
     status,
     'تعذر قراءة بيانات البلاغ.'
   );
-  return mapSupabaseRowToReport(row);
+  const report = mapSupabaseRowToReport(row);
+  if (!report) return null;
+  const rawRecord = row as Record<string, unknown> | null;
+  const ownerToken =
+    rawRecord && typeof rawRecord.owner_token === 'string' && rawRecord.owner_token.trim()
+      ? rawRecord.owner_token.trim()
+      : null;
+  return { report, ownerToken };
+}
+
+async function fetchSupabaseReportById(
+  reportId: string
+): Promise<LostReport | null> {
+  const result = await fetchSupabaseReportWithOwnerById(reportId);
+  return result ? result.report : null;
+}
+
+function hasSupabaseOwnerPermission(
+  reportId: string,
+  rowOwnerToken: string | null
+): boolean {
+  if (!rowOwnerToken) return true;
+  const localToken = getOwnerTokenForReport(reportId);
+  if (!localToken) return false;
+  return constantTimeEqual(localToken, rowOwnerToken);
 }
 
 async function supabaseUpdateReport(
@@ -2009,13 +2044,22 @@ async function supabaseUpdateReport(
     };
   }
 
-  const target = await fetchSupabaseReportById(reportId);
-  if (!target) {
+  const fetched = await fetchSupabaseReportWithOwnerById(reportId);
+  if (!fetched) {
     return {
       success: false,
       data: null,
       error: 'لم يتم العثور على البلاغ المطلوب.',
       statusCode: 404,
+    };
+  }
+  const { report: target, ownerToken: rowOwnerToken } = fetched;
+  if (!hasSupabaseOwnerPermission(reportId, rowOwnerToken)) {
+    return {
+      success: false,
+      data: null,
+      error: 'لا تملك صلاحية تعديل هذا البلاغ من هذا المتصفح.',
+      statusCode: 403,
     };
   }
   if (target.status !== 'pending') {
@@ -2422,13 +2466,22 @@ async function supabaseCancelReport(
   reportId: string
 ): Promise<ApiResponse<LostReport>> {
   if (!supabase) throw new SupabaseConnectionError('Supabase unavailable');
-  const target = await fetchSupabaseReportById(reportId);
-  if (!target) {
+  const fetched = await fetchSupabaseReportWithOwnerById(reportId);
+  if (!fetched) {
     return {
       success: false,
       data: null,
       error: 'لم يتم العثور على البلاغ المطلوب.',
       statusCode: 404,
+    };
+  }
+  const { report: target, ownerToken: rowOwnerToken } = fetched;
+  if (!hasSupabaseOwnerPermission(reportId, rowOwnerToken)) {
+    return {
+      success: false,
+      data: null,
+      error: 'لا تملك صلاحية سحب هذا البلاغ من هذا المتصفح.',
+      statusCode: 403,
     };
   }
   if (target.status !== 'pending') {
@@ -2475,13 +2528,22 @@ async function supabaseDeleteReport(
   reportId: string
 ): Promise<ApiResponse<{ deletedId: string }>> {
   if (!supabase) throw new SupabaseConnectionError('Supabase unavailable');
-  const target = await fetchSupabaseReportById(reportId);
-  if (!target) {
+  const fetched = await fetchSupabaseReportWithOwnerById(reportId);
+  if (!fetched) {
     return {
       success: false,
       data: null,
       error: 'لم يتم العثور على البلاغ المطلوب.',
       statusCode: 404,
+    };
+  }
+  const { report: target, ownerToken: rowOwnerToken } = fetched;
+  if (!hasSupabaseOwnerPermission(reportId, rowOwnerToken)) {
+    return {
+      success: false,
+      data: null,
+      error: 'لا تملك صلاحية حذف هذا البلاغ من هذا المتصفح.',
+      statusCode: 403,
     };
   }
   if (target.status !== 'cancelled' && target.status !== 'delivered') {
